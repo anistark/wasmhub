@@ -220,7 +220,7 @@ impl RuntimeLoader {
         Err(last_error.unwrap_or_else(|| Error::Other("Failed to fetch manifest".to_string())))
     }
 
-    async fn fetch_runtime_manifest(&self, language: Language) -> Result<RuntimeManifest> {
+    pub async fn fetch_runtime_manifest(&self, language: Language) -> Result<RuntimeManifest> {
         let mut last_error = None;
         for source in &self.cdn_sources {
             let url = match source {

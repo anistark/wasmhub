@@ -29,7 +29,7 @@ impl CacheManager {
     pub fn get_path(&self, language: Language, version: &str) -> PathBuf {
         self.cache_dir
             .join(language.as_str())
-            .join(format!("{}.wasm", version))
+            .join(format!("{version}.wasm"))
     }
 
     pub fn get(&self, language: Language, version: &str) -> Option<Runtime> {
@@ -138,7 +138,7 @@ impl CacheManager {
         }
 
         let hash = hasher.finalize();
-        Ok(format!("{:x}", hash))
+        Ok(format!("{hash:x}"))
     }
 
     pub fn verify_integrity(&self, runtime: &Runtime, expected_sha256: &str) -> Result<()> {

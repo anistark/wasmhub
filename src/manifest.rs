@@ -95,13 +95,7 @@ impl RuntimeManifest {
 }
 
 impl RuntimeVersion {
-    pub fn new(
-        file: String,
-        size: u64,
-        sha256: String,
-        released: String,
-        url: String,
-    ) -> Self {
+    pub fn new(file: String, size: u64, sha256: String, released: String, url: String) -> Self {
         Self {
             file,
             size,

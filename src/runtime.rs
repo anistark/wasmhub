@@ -47,7 +47,7 @@ impl FromStr for Language {
             "php" => Ok(Language::Php),
             "go" | "golang" => Ok(Language::Go),
             "rust" | "rs" => Ok(Language::Rust),
-            _ => Err(format!("Unknown language: {}", s)),
+            _ => Err(format!("Unknown language: {s}")),
         }
     }
 }

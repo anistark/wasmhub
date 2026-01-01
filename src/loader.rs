@@ -8,8 +8,7 @@ use std::path::PathBuf;
 #[cfg(feature = "progress")]
 use futures_util::StreamExt;
 
-const GITHUB_RELEASES_BASE: &str =
-    "https://github.com/anistark/wasm-runtime/releases/download";
+const GITHUB_RELEASES_BASE: &str = "https://github.com/anistark/wasm-runtime/releases/download";
 const JSDELIVR_BASE: &str = "https://cdn.jsdelivr.net/gh/anistark/wasm-runtime@latest";
 
 #[derive(Debug, Clone)]
@@ -60,12 +59,12 @@ impl RuntimeLoader {
 
     pub async fn download_runtime(&self, language: Language, version: &str) -> Result<Runtime> {
         let manifest = self.fetch_runtime_manifest(language).await?;
-        let version_info = manifest.get_version(version).ok_or_else(|| {
-            Error::VersionNotFound {
+        let version_info = manifest
+            .get_version(version)
+            .ok_or_else(|| Error::VersionNotFound {
                 language: language.to_string(),
                 version: version.to_string(),
-            }
-        })?;
+            })?;
 
         let mut last_error = None;
         for source in &self.cdn_sources {
@@ -146,7 +145,7 @@ impl RuntimeLoader {
                 .unwrap()
                 .progress_chars("#>-"),
         );
-        pb.set_message(format!("Downloading {}", url));
+        pb.set_message(format!("Downloading {url}"));
 
         let mut downloaded: u64 = 0;
         let mut stream = response.bytes_stream();
@@ -176,11 +175,12 @@ impl RuntimeLoader {
 
     pub async fn get_latest_version(&self, language: Language) -> Result<String> {
         let manifest = self.fetch_global_manifest().await?;
-        let runtime_info = manifest.get_language(language.as_str()).ok_or_else(|| {
-            Error::ManifestNotFound {
-                language: language.to_string(),
-            }
-        })?;
+        let runtime_info =
+            manifest
+                .get_language(language.as_str())
+                .ok_or_else(|| Error::ManifestNotFound {
+                    language: language.to_string(),
+                })?;
         Ok(runtime_info.latest.clone())
     }
 
@@ -249,10 +249,8 @@ impl RuntimeLoader {
             }
         }
 
-        Err(last_error.unwrap_or_else(|| {
-            Error::ManifestNotFound {
-                language: language.to_string(),
-            }
+        Err(last_error.unwrap_or_else(|| Error::ManifestNotFound {
+            language: language.to_string(),
         }))
     }
 
@@ -377,6 +375,9 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(loader.cache.get_path(Language::Python, "3.11.7").starts_with(temp_dir.path()));
+        assert!(loader
+            .cache
+            .get_path(Language::Python, "3.11.7")
+            .starts_with(temp_dir.path()));
     }
 }

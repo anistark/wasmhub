@@ -1,0 +1,48 @@
+[package]
+name = "wasm-runtime"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.85"
+authors = ["Kumar Anirudha <wasm@anirudha.dev>"]
+license = "MIT"
+repository = "https://github.com/anistark/wasm-runtime"
+description = "Download and manage WebAssembly runtimes for multiple languages"
+keywords = ["wasm", "webassembly", "runtime", "nodejs", "python"]
+categories = ["command-line-utilities", "development-tools", "wasm"]
+
+[dependencies]
+# Core dependencies
+tokio = { version = "1.43", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+reqwest = { version = "0.12", features = ["json", "stream"] }
+sha2 = "0.10"
+dirs = "5.0"
+futures-util = "0.3"
+
+# Optional features
+indicatif = { version = "0.17", optional = true }
+
+# CLI dependencies (optional, enabled with 'cli' feature)
+clap = { version = "4.5", features = ["derive"], optional = true }
+anyhow = { version = "1.0", optional = true }
+
+[features]
+default = []
+progress = ["dep:indicatif"]
+cli = ["dep:clap", "dep:anyhow"]
+
+[[bin]]
+name = "wasm-runtime"
+path = "src/bin/wasm-runtime.rs"
+required-features = ["cli"]
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3.8"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

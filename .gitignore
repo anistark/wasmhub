@@ -43,4 +43,4 @@ env/
 
 # Temporary files
 *.tmp
-PLAN.md
+plan/

@@ -35,6 +35,7 @@ pub struct RuntimeLoader {
     cache: CacheManager,
     client: Client,
     cdn_sources: Vec<CdnSource>,
+    base_url: Option<String>,
     max_retries: u32,
     initial_backoff_ms: u64,
     max_backoff_ms: u64,
@@ -48,6 +49,7 @@ impl RuntimeLoader {
             cache: CacheManager::new()?,
             client: Client::new(),
             cdn_sources: vec![CdnSource::GitHubReleases, CdnSource::JsDelivr],
+            base_url: None,
             max_retries: DEFAULT_MAX_RETRIES,
             initial_backoff_ms: DEFAULT_INITIAL_BACKOFF_MS,
             max_backoff_ms: DEFAULT_MAX_BACKOFF_MS,
@@ -104,6 +106,9 @@ impl RuntimeLoader {
 
     fn build_download_url(&self, source: &CdnSource, language: Language, version: &str) -> String {
         let filename = format!("{}-{}.wasm", language.as_str(), version);
+        if let Some(ref base) = self.base_url {
+            return format!("{base}/{filename}");
+        }
         match source {
             CdnSource::GitHubReleases => {
                 format!("{}/{}", source.base_url(), filename)
@@ -245,7 +250,11 @@ impl RuntimeLoader {
     async fn fetch_global_manifest(&self) -> Result<GlobalManifest> {
         let mut last_error = None;
         for source in &self.cdn_sources {
-            let url = format!("{}/manifest.json", source.base_url());
+            let url = if let Some(ref base) = self.base_url {
+                format!("{base}/manifest.json")
+            } else {
+                format!("{}/manifest.json", source.base_url())
+            };
 
             match self.fetch_json(&url).await {
                 Ok(manifest) => return Ok(manifest),
@@ -262,16 +271,20 @@ impl RuntimeLoader {
     pub async fn fetch_runtime_manifest(&self, language: Language) -> Result<RuntimeManifest> {
         let mut last_error = None;
         for source in &self.cdn_sources {
-            let url = match source {
-                CdnSource::GitHubReleases => {
-                    format!("{}/{}-manifest.json", source.base_url(), language.as_str())
-                }
-                CdnSource::JsDelivr => {
-                    format!(
-                        "{}/runtimes/{}/manifest.json",
-                        source.base_url(),
-                        language.as_str()
-                    )
+            let url = if let Some(ref base) = self.base_url {
+                format!("{base}/{}-manifest.json", language.as_str())
+            } else {
+                match source {
+                    CdnSource::GitHubReleases => {
+                        format!("{}/{}-manifest.json", source.base_url(), language.as_str())
+                    }
+                    CdnSource::JsDelivr => {
+                        format!(
+                            "{}/runtimes/{}/manifest.json",
+                            source.base_url(),
+                            language.as_str()
+                        )
+                    }
                 }
             };
 
@@ -309,6 +322,7 @@ impl Default for RuntimeLoader {
 pub struct RuntimeLoaderBuilder {
     cache_dir: Option<PathBuf>,
     cdn_sources: Option<Vec<CdnSource>>,
+    base_url: Option<String>,
     max_retries: Option<u32>,
     initial_backoff_ms: Option<u64>,
     max_backoff_ms: Option<u64>,
@@ -328,6 +342,13 @@ impl RuntimeLoaderBuilder {
 
     pub fn cdn_sources(mut self, sources: Vec<CdnSource>) -> Self {
         self.cdn_sources = Some(sources);
+        self
+    }
+
+    /// Override the base URL for all CDN requests.
+    /// Useful for testing with mock servers.
+    pub fn base_url(mut self, url: String) -> Self {
+        self.base_url = Some(url);
         self
     }
 
@@ -365,6 +386,7 @@ impl RuntimeLoaderBuilder {
             cdn_sources: self
                 .cdn_sources
                 .unwrap_or_else(|| vec![CdnSource::GitHubReleases, CdnSource::JsDelivr]),
+            base_url: self.base_url,
             max_retries: self.max_retries.unwrap_or(DEFAULT_MAX_RETRIES),
             initial_backoff_ms: self
                 .initial_backoff_ms

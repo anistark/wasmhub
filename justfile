@@ -189,8 +189,12 @@ release-github version:
     echo "GitHub release ${TAG} created!"
     echo "Check build progress at: https://github.com/anistark/wasmhub/actions"
 
-# Run CI checks locally (format, lint, test)
-ci: format-check lint test
+# Run CI checks locally (format, lint, library check, test)
+ci: format-check lint check-lib test
+
+# Verify library compiles with no features (no CLI deps leaking)
+check-lib:
+    cargo check --lib
 
 # Install CLI locally
 install:

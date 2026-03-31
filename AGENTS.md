@@ -156,6 +156,12 @@ Do not consider a change complete until all of the above pass cleanly.
 - **Prefer `just` commands** over raw `cargo` commands. The justfile handles feature flags correctly.
 - **Prompt the user if `AGENTS.md` needs updating.** If your changes alter the build pipeline, add a language, change manifest format, or modify release process, tell the user.
 
+### Documentation
+
+- **Source of truth:** The [README.md](README.md) in this repo. Keep it up to date when adding commands, runtimes, or API changes.
+- **API reference** is auto-generated at [docs.rs/wasmhub](https://docs.rs/wasmhub) from inline doc comments.
+- **Supplementary docs** exist in `../wasmrun/docs/docs/wasmhub/` (rendered on wasmrun.readthedocs.io) but are not actively maintained — update only if making significant changes.
+
 ### Planning Documents
 
 - **`plan/` directory** is for all planning and design docs. It's gitignored — never commit it.

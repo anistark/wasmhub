@@ -2,7 +2,7 @@
 
 **Open-source WASM Hub of language runtimes**
 
-Download and manage WASM runtimes for Node.js, Python, Ruby, PHP, Go, and more - all in one place.
+Download and manage WASM runtimes for Node.js, Python, Ruby, PHP, Go, and more — all in one place.
 
 [![Crates.io](https://img.shields.io/crates/v/wasmhub.svg)](https://crates.io/crates/wasmhub)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -31,6 +31,7 @@ A centralized, open-source repository providing **versioned WASM language runtim
 # Cargo.toml
 [dependencies]
 wasmhub = "0.1"
+tokio = { version = "1", features = ["full"] }
 ```
 
 ```rust
@@ -38,7 +39,7 @@ use wasmhub::{RuntimeLoader, Language};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let loader = RuntimeLoader::new();
+    let loader = RuntimeLoader::new()?;
 
     // Download Go 1.23 (auto-cached)
     let go = loader.get_runtime(Language::Go, "1.23").await?;
@@ -55,8 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 cargo install wasmhub --features cli
 
 # Download runtimes
-wasmhub get go@1.23
-wasmhub get rust@1.82
+wasmhub get go 1.23
+wasmhub get rust 1.82
 
 # List available
 wasmhub list
@@ -78,14 +79,14 @@ const wasmBytes = await response.arrayBuffer();
 
 ## 🌟 Features
 
-- ✅ **Multi-language support** - Go, Rust (more coming soon)
-- ✅ **Version management** - Pin to specific versions
-- ✅ **Smart caching** - Download once, use forever
-- ✅ **Type-safe API** - Rust library with compile-time guarantees
-- ✅ **Fast downloads** - Parallel, resumable transfers
-- ✅ **CDN distribution** - Served via jsDelivr for browser access
-- ✅ **SHA256 verification** - Integrity checks built-in
-- ✅ **Cross-platform** - Works on Windows, macOS, Linux
+- ✅ **Multi-language support** — Go, Rust (more coming soon)
+- ✅ **Version management** — Pin to specific versions
+- ✅ **Smart caching** — Download once, use forever
+- ✅ **Type-safe API** — Rust library with compile-time guarantees
+- ✅ **Multi-CDN fallback** — GitHub Releases + jsDelivr with automatic failover
+- ✅ **Retry with backoff** — Exponential backoff on transient failures
+- ✅ **SHA256 verification** — Integrity checks on every download
+- ✅ **Cross-platform** — Works on Windows, macOS, Linux
 
 ---
 
@@ -93,14 +94,125 @@ const wasmBytes = await response.arrayBuffer();
 
 | Language | Versions | Size | Status | About |
 |----------|----------|------|--------|-------|
-| **Go** | 1.23 | 261KB | 🚀 Upcoming Release | Built with TinyGo, supports filesystem, env, args, stdio |
-| **Rust** | 1.82 | 76KB | 🚀 Upcoming Release |  Full std library support with wasm32-wasip1 target |
-| **Node.js** | - | - | 🚧 Coming Soon | - |
-| **Python** | - | - | 🚧 Coming Soon | - |
-| **Ruby** | - | - | 🚧 Coming Soon | - |
-| **PHP** | - | - | 🚧 Coming Soon | - |
+| **Go** | 1.23 | 261 KB | ✅ Available | Built with TinyGo, supports filesystem, env, args, stdio |
+| **Rust** | 1.82 | 76 KB | ✅ Available | Full std library support with wasm32-wasip1 target |
+| **Node.js** | — | — | 🔜 Coming Soon | — |
+| **Python** | — | — | 🔜 Coming Soon | — |
+| **Ruby** | — | — | 🔜 Coming Soon | — |
+| **PHP** | — | — | 🔜 Coming Soon | — |
+
+Both available runtimes target **WASI Preview 1** (`wasip1`).
 
 *More languages and versions coming soon! Contributions welcome.* ✨
+
+---
+
+## 📥 CLI Reference
+
+### Installation
+
+```sh
+cargo install wasmhub --features cli
+```
+
+### Commands
+
+```sh
+wasmhub get <language> [version]          # Download runtime (default: latest)
+wasmhub get <language> <version> --force  # Force re-download
+wasmhub list [language]                   # List available runtimes
+wasmhub info <language> [version]         # Show runtime details
+wasmhub cache show                        # Show cache contents
+wasmhub cache clear <language> <version>  # Clear specific cached runtime
+wasmhub cache clear-all [--yes]           # Clear all cache
+```
+
+### Language Aliases
+
+| Language | Accepted values |
+|----------|----------------|
+| Node.js | `nodejs`, `node`, `node.js` |
+| Python | `python`, `py` |
+| Ruby | `ruby`, `rb` |
+| PHP | `php` |
+| Go | `go`, `golang` |
+| Rust | `rust`, `rs` |
+
+### Examples
+
+```sh
+# Download latest Go runtime
+wasmhub get go
+
+# Download specific version
+wasmhub get rust 1.82
+
+# Force re-download even if cached
+wasmhub get go 1.23 --force
+
+# See what's cached locally
+wasmhub cache show
+
+# Clear everything
+wasmhub cache clear-all --yes
+```
+
+---
+
+## 📚 Library Usage
+
+```rust
+use wasmhub::{RuntimeLoader, Language};
+
+#[tokio::main]
+async fn main() -> wasmhub::Result<()> {
+    let loader = RuntimeLoader::new()?;
+
+    // Download or get from cache
+    let runtime = loader.get_runtime(Language::Go, "1.23").await?;
+    println!("Path: {}", runtime.path.display());
+    println!("SHA256: {}", runtime.sha256);
+
+    // List available runtimes
+    let manifest = loader.list_available().await?;
+    for (lang, info) in &manifest.languages {
+        println!("{}: latest = {}", lang, info.latest);
+    }
+
+    // Get latest version
+    let latest = loader.get_latest_version(Language::Go).await?;
+    println!("Latest Go: {}", latest);
+
+    // Cache management
+    loader.clear_cache(Language::Go, "1.23")?;
+    loader.clear_all_cache()?;
+
+    Ok(())
+}
+```
+
+### Builder Configuration
+
+```rust
+use wasmhub::{RuntimeLoader, CdnSource};
+use std::path::PathBuf;
+
+let loader = RuntimeLoader::builder()
+    .cache_dir(PathBuf::from("/tmp/my-cache"))
+    .cdn_sources(vec![CdnSource::GitHubReleases])
+    .max_retries(5)
+    .initial_backoff_ms(1000)
+    .max_backoff_ms(60_000)
+    .build()?;
+```
+
+### Cargo Features
+
+| Feature | What it enables | Default |
+|---------|----------------|---------|
+| *(none)* | Library only | ✅ |
+| `progress` | Download progress bars (`indicatif`) | No |
+| `cli` | CLI binary + `clap`, `anyhow`, `colored` + `progress` | No |
 
 ---
 
@@ -114,20 +226,13 @@ WASM runtime binaries are built and published automatically on each [GitHub Rele
 # Download the latest Go runtime
 curl -LO https://github.com/anistark/wasmhub/releases/latest/download/go-1.23.wasm
 
-# Download a specific version's manifest
-curl -LO https://github.com/anistark/wasmhub/releases/download/v0.1.0/manifest.json
-```
-
-### Using the CLI
-
-```sh
-# The CLI automatically fetches from releases
-wasmhub get go@1.23
+# Download the global manifest
+curl -LO https://github.com/anistark/wasmhub/releases/latest/download/manifest.json
 ```
 
 ### Manifest Format
 
-Each runtime has a `manifest.json` describing available versions:
+Each runtime has a per-language `manifest.json`:
 
 ```json
 {
@@ -153,22 +258,18 @@ Each runtime has a `manifest.json` describing available versions:
 ### 1. **Browser-Based Development Environments**
 Build tools like StackBlitz/CodeSandbox without the proprietary runtime:
 ```rust
-// Load Node.js in browser
 let nodejs_wasm = loader.get_runtime(Language::NodeJs, "20.2.0").await?;
-// Run user's project in WASM VM
 ```
 
 ### 2. **Serverless Edge Functions**
 Deploy language runtimes to Cloudflare Workers, Deno Deploy, etc.:
 ```sh
-wasmhub get python@3.11.7
-# Deploy to edge with Python support
+wasmhub get python 3.11.7
 ```
 
 ### 3. **Testing Frameworks**
 Run tests in isolated WASM environments:
 ```rust
-// Test with specific Node.js version
 let node18 = loader.get_runtime(Language::NodeJs, "18.19.0").await?;
 run_tests_with_runtime(node18)?;
 ```
@@ -176,7 +277,6 @@ run_tests_with_runtime(node18)?;
 ### 4. **Educational Platforms**
 Create online code editors with multiple language support:
 ```javascript
-// Student selects Python 3.12
 const runtime = await fetchRuntime('python', '3.12.0');
 executeCode(studentCode, runtime);
 ```
@@ -185,11 +285,10 @@ executeCode(studentCode, runtime);
 
 ## 📖 Documentation
 
-- **[API Documentation](https://docs.rs/wasmhub)** - Full Rust API reference
-- **[Contributing Guide](CONTRIBUTING.md)** - Help build this project
+- **[API Documentation](https://docs.rs/wasmhub)** — Full Rust API reference
+- **[Contributing Guide](CONTRIBUTING.md)** — How to contribute
 
 ---
-
 
 ## 🤝 Contributing
 
@@ -214,32 +313,17 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## 📄 License
 
-MIT License - see [LICENSE](./LICENSE) for details.
+MIT License — see [LICENSE](./LICENSE) for details.
 
 ---
 
 ## 🙏 Acknowledgments
 
 This project builds upon the amazing work of:
-- [Pyodide](https://pyodide.org) - Python in WASM
-- [ruby.wasm](https://github.com/ruby/ruby.wasm) - Ruby in WASM
-- [CodeSandbox](https://codesandbox.io) - nodebox inspiration
-- [Wasmer](https://wasmer.io) - WASM runtime ecosystem
-
----
-
-## ⚡ Why WASM Runtime?
-
-**The Problem:** Language runtimes for WASM are scattered across different projects. Finding, downloading, and managing them is painful.
-
-**The Solution:** A single, centralized repository with:
-- ✅ Versioned runtimes for multiple languages
-- ✅ Consistent APIs (Rust library + CLI)
-- ✅ CDN distribution for browsers
-- ✅ Smart caching and integrity verification
-- ✅ Open-source and community-driven
-
-**Join us in making WASM runtimes accessible to everyone!** 🚀
+- [Pyodide](https://pyodide.org) — Python in WASM
+- [ruby.wasm](https://github.com/ruby/ruby.wasm) — Ruby in WASM
+- [CodeSandbox](https://codesandbox.io) — nodebox inspiration
+- [Wasmer](https://wasmer.io) — WASM runtime ecosystem
 
 ---
 

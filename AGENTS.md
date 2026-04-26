@@ -158,9 +158,18 @@ Do not consider a change complete until all of the above pass cleanly.
 
 ### Documentation
 
-- **Source of truth:** The [README.md](README.md) in this repo. Keep it up to date when adding commands, runtimes, or API changes.
+- **README.md** — GitHub front page. Tagline, quick install, feature highlights, link out to the docs site. Keep it lean; long-form lives on the docs site.
+- **Docs site** (`docs/`) — Eleventy 3.x + [eleventy-libdoc](https://github.com/ita-design-system/eleventy-libdoc) starter, deployed to GitHub Pages at https://anistark.github.io/wasmhub/. Owns the deep content: getting-started, CLI reference, library guide, architecture, manifest format, contributor guides, per-runtime catalog.
 - **API reference** is auto-generated at [docs.rs/wasmhub](https://docs.rs/wasmhub) from inline doc comments.
-- **Supplementary docs** exist in `../wasmrun/docs/docs/wasmhub/` (rendered on wasmrun.readthedocs.io) but are not actively maintained — update only if making significant changes.
+
+### Working in `docs/`
+
+- Content is plain Markdown with YAML frontmatter. To add a page: drop a `.md` file under `docs/content/`, follow libdoc's frontmatter conventions for navigation/title, cross-link with the Eleventy `url` filter (required for the `/wasmhub/` path prefix).
+- Local preview: `cd docs && pnpm install && pnpm run serve` → http://localhost:8080/
+- Build: `pnpm run build` → output in `docs/_site/` (gitignored).
+- **Use pnpm, not npm** — lockfile is `pnpm-lock.yaml`, CI uses `pnpm/action-setup@v4`.
+- Theming lives in `docs/assets/theme.css` (CSS custom-property overrides). **Do not edit libdoc's vendored CSS directly** — it makes future upstream pulls painful.
+- Deployment is automatic: any push to `main` touching `docs/**` triggers `.github/workflows/docs.yml`.
 
 ### Planning Documents
 
@@ -211,6 +220,14 @@ scripts/
 ├── generate-global-manifest.sh  # Aggregates into root manifest.json
 ├── publish.sh               # Full release workflow
 └── install-wasi-sdk.sh      # WASI SDK installer
+
+docs/                        # Eleventy + libdoc docs site (deployed to GitHub Pages)
+├── .eleventy.js
+├── package.json
+├── settings.json
+├── content/                 # Markdown pages with frontmatter
+├── assets/theme.css         # Wasmhub-branded overrides on libdoc CSS variables
+└── _site/                   # Build output — gitignored
 
 manifest.json               # Global manifest (all languages, aggregated)
 Dockerfile                   # Reproducible build environment
@@ -298,6 +315,11 @@ just optimize           # Run wasm-opt on all runtimes
 just publish            # Full release (tag + GitHub + crates.io)
 just publish-check      # Dry-run crates.io publish
 just publish-github     # GitHub release only (no crates.io)
+just docs               # Serve docs site locally (Eleventy)
+just docs-install       # Install docs site deps (pnpm)
+just docs-build         # Build docs site for production
+just docs-clean         # Remove docs site _site/ output
+just api-docs           # Open Rust API docs (cargo doc)
 ```
 
 ---
@@ -309,6 +331,7 @@ just publish-github     # GitHub release only (no crates.io)
 | `ci.yml` | Push to main, PRs | Format check + clippy + tests (Linux/macOS/Windows) |
 | `build-runtimes.yml` | Changes to `runtimes/` or `scripts/`, manual | Builds runtimes in Docker, uploads as artifacts |
 | `release.yml` | GitHub Release created, manual | Builds runtimes + CLI binaries for all platforms, uploads to release |
+| `docs.yml` | Push to main with `docs/**` changes, manual | Builds Eleventy site in `docs/`, deploys to GitHub Pages |
 
 ---
 

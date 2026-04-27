@@ -44,3 +44,8 @@ env/
 # Temporary files
 *.tmp
 plan/
+
+# Docs site (Eleventy)
+docs/_site/
+docs/node_modules/
+docs/.cache/

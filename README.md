@@ -8,6 +8,7 @@ Download and manage WASM runtimes for Node.js, Python, Ruby, PHP, Go, and more �
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![CI](https://github.com/anistark/wasmhub/workflows/CI/badge.svg)](https://github.com/anistark/wasmhub/actions)
 [![Build Runtimes](https://github.com/anistark/wasmhub/workflows/Build%20Runtimes/badge.svg)](https://github.com/anistark/wasmhub/actions/workflows/build-runtimes.yml)
+[![Docs](https://github.com/anistark/wasmhub/actions/workflows/docs.yml/badge.svg)](https://anistark.github.io/wasmhub/)
 
 ---
 
@@ -285,8 +286,9 @@ executeCode(studentCode, runtime);
 
 ## 📖 Documentation
 
+- **[Docs Site](https://anistark.github.io/wasmhub/)** — Getting started, CLI reference, library guide, architecture _(coming soon)_
 - **[API Documentation](https://docs.rs/wasmhub)** — Full Rust API reference
-- **[Contributing Guide](CONTRIBUTING.md)** — How to contribute
+- **[wasmrun Documentation](https://wasmrun.readthedocs.io/)** — WASMRUN docs, and guide
 
 ---
 
@@ -306,8 +308,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## 🌐 Community & Support
 
-- **GitHub Discussions:** [Ask questions, share ideas](https://github.com/anistark/wasmhub/discussions)
-- **Twitter:** [@anistark](https://x.com/kranirudha)
+- **Join:** [Discord](https://discord.gg/AJMEeFXxXy)
+- **Follow:** [@anistark](https://x.com/kranirudha)
+
 
 ---
 

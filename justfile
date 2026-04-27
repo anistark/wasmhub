@@ -46,9 +46,25 @@ test-verbose:
 clean:
     cargo clean
 
-# Generate and open documentation
-docs:
+# Generate and open Rust API docs
+api-docs:
     cargo doc --all-features --open
+
+# Install docs site dependencies (pnpm)
+docs-install:
+    cd docs && pnpm install
+
+# Serve docs site locally at http://localhost:8080
+docs:
+    cd docs && pnpm run serve
+
+# Build docs site for production (output: docs/_site/)
+docs-build:
+    cd docs && pnpm run build
+
+# Remove docs site build output
+docs-clean:
+    cd docs && pnpm run clean
 
 # Publish release (extracts version from Cargo.toml)
 publish:

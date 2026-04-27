@@ -1,0 +1,38 @@
+{
+    "lang": "en",
+    "siteTitle": "WasmHub",
+    "siteDescription": "Open-source WASM Hub of language runtimes — download, cache, and verify versioned WebAssembly runtimes for Go, Rust, and more.",
+    "author": "Kumar Anirudha",
+    "faviconUrl": "/assets/favicon.svg",
+    "productionUrl": "https://anistark.github.io/wasmhub",
+    "htmlBasePathPrefix": "/wasmhub",
+    "searchEnabled": true,
+    "tocEnabled": true,
+    "displayTagsListLink": false,
+    "hljsLanguages": [
+        "bash",
+        "rust",
+        "go",
+        "javascript",
+        "json",
+        "yaml",
+        "toml",
+        "markdown",
+        "xml"
+    ],
+    "customLinks": [
+        {
+            "url": "https://github.com/anistark/wasmhub",
+            "text": "GitHub"
+        },
+        {
+            "url": "https://crates.io/crates/wasmhub",
+            "text": "crates.io"
+        },
+        {
+            "url": "https://docs.rs/wasmhub",
+            "text": "API Docs"
+        }
+    ],
+    "editThisPageRootUrl": "https://github.com/anistark/wasmhub/blob/main/docs"
+}

@@ -4,6 +4,7 @@ import { InputPathToUrlTransformPlugin }    from "@11ty/eleventy";
 import { eleventyImageTransformPlugin }     from "@11ty/eleventy-img";
 import { EleventyHtmlBasePlugin }           from "@11ty/eleventy";
 import pluginRss                            from "@11ty/eleventy-plugin-rss";
+import syntaxHighlight                      from "@11ty/eleventy-plugin-syntaxhighlight";
 // END 11TY imports
 
 // START LibDoc imports
@@ -18,6 +19,7 @@ export default function(eleventyConfig) {
     eleventyConfig.addPlugin(eleventyNavigationPlugin);
     eleventyConfig.addPlugin(eleventyImageTransformPlugin, libdocFunctions.pluginsParameters.eleventyImageTransform());
     eleventyConfig.addPlugin(pluginRss);
+    eleventyConfig.addPlugin(syntaxHighlight);
     // END PLUGINS
 
     // START FILTERS

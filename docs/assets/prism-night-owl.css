@@ -1,0 +1,154 @@
+/*
+ * Prism Night Owl theme for WasmHub docs.
+ * Palette adapted from Sarah Drasner's Night Owl VS Code Theme
+ * (https://github.com/sdras/night-owl-vscode-theme), MIT licensed.
+ *
+ * Outer <pre> chrome (margin/padding/border) is handled by libdoc's
+ * `main > pre` rules in ds__defaults.css; this file only colors the
+ * inner <code class="language-…"> block and its Prism token spans.
+ */
+
+@media screen {
+    main > pre > code[class*="language-"],
+    code[class*="language-"] {
+        display: block;
+        overflow-x: auto;
+        padding: 1em;
+        background: #011627;
+        color: #d6deeb;
+        font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+        line-height: 1.55;
+        tab-size: 4;
+        hyphens: none;
+        white-space: pre;
+        word-spacing: normal;
+        word-break: normal;
+        word-wrap: normal;
+    }
+
+    :not(pre) > code[class*="language-"] {
+        display: inline;
+        padding: 0.1em 0.3em;
+        border-radius: 0.3em;
+        white-space: normal;
+    }
+
+    .token.comment,
+    .token.prolog,
+    .token.cdata {
+        color: #637777;
+        font-style: italic;
+    }
+
+    .token.punctuation {
+        color: #d6deeb;
+    }
+
+    .token.namespace {
+        opacity: 0.7;
+    }
+
+    .token.boolean,
+    .token.null,
+    .token.nil {
+        color: #ff5874;
+    }
+
+    .token.number {
+        color: #f78c6c;
+    }
+
+    .token.string,
+    .token.char,
+    .token.attr-value,
+    .token.template-string {
+        color: #ecc48d;
+    }
+
+    .token.operator,
+    .token.entity,
+    .token.url {
+        color: #c792ea;
+    }
+
+    .token.keyword,
+    .token.atrule,
+    .token.important,
+    .token.rule {
+        color: #c792ea;
+        font-style: italic;
+    }
+
+    .token.builtin,
+    .token.tag,
+    .token.attr-name,
+    .token.property {
+        color: #7fdbca;
+    }
+
+    .token.class-name,
+    .token.maybe-class-name {
+        color: #ffcb8b;
+    }
+
+    .token.function,
+    .token.method {
+        color: #82aaff;
+    }
+
+    .token.parameter {
+        color: #7fdbca;
+    }
+
+    .token.variable,
+    .token.constant,
+    .token.symbol {
+        color: #addb67;
+    }
+
+    .token.regex {
+        color: #5ca7e4;
+    }
+
+    .token.selector,
+    .token.selector-tag {
+        color: #ff6363;
+    }
+
+    .token.deleted {
+        color: #ef5350;
+        font-style: italic;
+    }
+
+    .token.inserted {
+        color: #addb67;
+        font-style: italic;
+    }
+
+    .token.italic {
+        font-style: italic;
+    }
+
+    .token.bold {
+        font-weight: bold;
+    }
+
+    /* Per-line highlighting from @11ty/eleventy-plugin-syntaxhighlight */
+    .highlight-line {
+        display: block;
+        padding: 0 1em;
+        margin: 0 -1em;
+    }
+
+    .highlight-line-active {
+        background-color: rgba(130, 170, 255, 0.12);
+    }
+
+    .highlight-line-add {
+        background-color: rgba(173, 219, 103, 0.12);
+    }
+
+    .highlight-line-remove {
+        background-color: rgba(239, 83, 80, 0.12);
+    }
+}

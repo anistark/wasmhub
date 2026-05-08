@@ -245,13 +245,10 @@ const libdocUi = {
             const elBtn = evt.target.closest('button');
             const content = evt.target.closest('pre').querySelector('code').innerText;
             libdocUi.copyToClipboard(content, {notificationEnabled: false});
-            if (elBtn.dataset.originalText === undefined) elBtn.dataset.originalText = elBtn.innerText;
-            elBtn.innerHTML = `<span style="margin-left: -4px;"
-                    class="d-flex | pos-absolute t-tX-100 | p-2 mr-1 | c-neutral-100 bc-success-500 brad-4">
-                    <span class="icon-check pos-absolute top-50 left-50 t-tY-50 t-tX-50 | fs-1"></span>
-                </span> ${libdocMessages.copied}!`;
+            if (elBtn.dataset.originalHtml === undefined) elBtn.dataset.originalHtml = elBtn.innerHTML;
+            elBtn.innerHTML = `<span class="icon-check c-success-500"></span>`;
             setTimeout(function() {
-                elBtn.innerHTML = elBtn.dataset.originalText;
+                elBtn.innerHTML = elBtn.dataset.originalHtml;
                 elBtn.classList.remove('pe-none');
             }, 3000);
         },
@@ -829,11 +826,13 @@ const libdocUi = {
                 if (elCommands === null) {
                     const commandBarMarkup = `<div class="d-flex jc-end | pos-relative">
                             <button type="button"
+                                title="${libdocMessages.copyCode}"
+                                aria-label="${libdocMessages.copyCode}"
                                 class="
                                 d-flex ai-center
-                                pt-5 pb-5 fvs-wght-400 fs-2 tt-uppercase
+                                pt-5 pb-5 fs-4
                                 bc-0 c-primary-900 b-0 cur-pointer
-                                copy_code_block">${libdocMessages.copyCode}</button>
+                                copy_code_block"><span class="icon-copy-simple"></span></button>
                         </div>`;
                     elPre.insertAdjacentHTML('afterbegin', commandBarMarkup);
                 }
@@ -846,19 +845,20 @@ const libdocUi = {
                     }
                 }
             });
-            // Adjust proper language name display
+            // Adjust proper language name display.
+            // Match the alias against the space-separated alias list before the `|`,
+            // not as a substring of the whole entry (which would let "sh" match "xsharp").
             const languagesNamesArray = libdocUi.getJson(libdocUi.defaults.supportedLanguagesJsonPath);
             languagesNamesArray.then(languagesArray => {
                 if (languagesArray.length > 0) {
                     document.querySelectorAll('code[data-language-name]').forEach(function(elCode) {
                         const languageAlias = elCode.dataset.languageName;
-                        let index = -1;
-                        languagesArray.forEach(function(lang, langIndex) {
-                            if (lang.includes(languageAlias)) index = langIndex;
+                        const match = languagesArray.find(function(lang) {
+                            const aliases = lang.split('|')[0].split(' ');
+                            return aliases.includes(languageAlias);
                         });
-                        if (index > -1) {
-                            const languageName = languagesArray[index].split('|')[1];
-                            elCode.dataset.languageName = languageName;
+                        if (match) {
+                            elCode.dataset.languageName = match.split('|')[1];
                         }
                     })
                 }
@@ -951,7 +951,6 @@ const libdocUi = {
         libdocUi.defaults.darkModeCssMedia = libdocUi.el.darkModeCssMetaLink.media;
         libdocUi.setColorScheme(libdocUi.getUserPreferences().colorScheme);
         libdocUi._currentScreenSizeName = libdocUi.getCurrentScreenSizeName();
-        hljs.highlightAll();
         libdocUi.createCopyCodeOnCodeBlocks();
         libdocUi.createFloatingToc();
         libdocUi.createGoToTop();

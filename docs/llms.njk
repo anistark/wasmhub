@@ -1,0 +1,27 @@
+---
+permalink: /llms.txt
+eleventyExcludeFromCollections: true
+---
+# {{ libdocConfig.siteTitle }}
+
+> {{ libdocConfig.siteDescription }}
+
+This site documents WasmHub, an open-source hub for versioned WebAssembly language runtimes. It is usable as a Rust library, a CLI tool, and via CDN. The pages below cover installation, the CLI, the Rust API, the manifest format, the runtime download/cache architecture, and the contributor guide for adding new runtimes.
+
+## Docs
+
+{% for page in collections.all -%}
+{%- if page.data.title and page.url and page.url != "/" -%}
+- [{{ page.data.title }}]({{ libdocConfig.productionUrl }}{{ page.url }}){% if page.data.description %}: {{ page.data.description }}{% endif %}
+{% endif -%}
+{%- endfor %}
+
+## Source
+
+- [GitHub repository](https://github.com/anistark/wasmhub): source code, issue tracker, and markdown sources for every page on this site
+- [crates.io](https://crates.io/crates/wasmhub): published Rust crate
+- [API reference (docs.rs)](https://docs.rs/wasmhub): generated Rust API documentation
+
+## Optional
+
+- [Full documentation as a single file]({{ libdocConfig.productionUrl }}/llms-full.txt): every page concatenated as plain markdown, useful for pasting the whole docs into an LLM context window

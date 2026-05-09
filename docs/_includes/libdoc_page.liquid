@@ -62,7 +62,7 @@
     <link rel="stylesheet" href="/core/assets/css/ds__defaults.css">
     <link rel="stylesheet" href="/core/assets/css/ds__colors.css">
     <link rel="stylesheet" href="/core/assets/css/ds__dark_mode.css" id="libdoc_dark_mode_css">
-    <link rel="stylesheet" href="/core/assets/css/hljs/night-owl.css">
+    <link rel="stylesheet" href="/assets/prism-night-owl.css">
     <link rel="stylesheet" href="/core/assets/css/icons.css">
     <link rel="stylesheet" href="/assets/theme.css">
     <style>
@@ -432,10 +432,6 @@
     </div>
     
     <script src="/core/assets/js/sandbox.js"></script>
-    <script src="/core/assets/js/hljs/highlight.min.js"></script>
-    {% for hljsLang in libdocConfig.hljsLanguages %}
-        <script src="/core/assets/js/hljs/languages/{{ hljsLang }}.min.js"></script>
-    {% endfor %}
     <script src="/core/assets/js/ui.js"></script>
     {% if libdocConfig.searchEnabled %}
         <link rel="stylesheet" href="/core/assets/css/autocomplete.css">

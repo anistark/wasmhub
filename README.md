@@ -289,6 +289,7 @@ executeCode(studentCode, runtime);
 - **[Docs Site](https://anistark.github.io/wasmhub/)** — Getting started, CLI reference, library guide, architecture _(coming soon)_
 - **[API Documentation](https://docs.rs/wasmhub)** — Full Rust API reference
 - **[wasmrun Documentation](https://wasmrun.readthedocs.io/)** — WASMRUN docs, and guide
+- **[llms.txt](https://anistark.github.io/wasmhub/llms.txt)** / **[llms-full.txt](https://anistark.github.io/wasmhub/llms-full.txt)** — LLM-friendly index and full-content dump of the docs
 
 ---
 

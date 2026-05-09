@@ -31,15 +31,6 @@ export default {
     htmlBasePathPrefix: userConfig.htmlBasePathPrefix ?? "",
     sandboxRunSwitch: userConfig.sandboxRunSwitch ?? true,
     searchEnabled: userConfig.searchEnabled ?? true,
-    hljsLanguages: userConfig.hljsLanguages ?? [
-        "xml",
-        "javascript",
-        "json",
-        "yaml",
-        "liquid",
-        "markdown",
-        "css"
-    ],
     roundedImagesCorners: userConfig.roundedImagesCorners ?? true,
     editThisPageRootUrl: userConfig.editThisPageRootUrl ?? false,
     imgBgColorLightMode: userConfig.imgBgColorLightMode ?? "transparent",

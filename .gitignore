@@ -44,6 +44,8 @@ env/
 # Temporary files
 *.tmp
 plan/
+.pi
+.claude
 
 # Docs site (Eleventy)
 docs/_site/

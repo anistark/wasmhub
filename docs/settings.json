@@ -9,17 +9,6 @@
     "searchEnabled": true,
     "tocEnabled": true,
     "displayTagsListLink": false,
-    "hljsLanguages": [
-        "bash",
-        "rust",
-        "go",
-        "javascript",
-        "json",
-        "yaml",
-        "toml",
-        "markdown",
-        "xml"
-    ],
     "customLinks": [
         {
             "url": "https://github.com/anistark/wasmhub",

@@ -20,6 +20,11 @@ on:
         required: false
         default: 'true'
         type: boolean
+      build_nodejs:
+        description: 'Build Node.js runtime (experimental)'
+        required: false
+        default: 'false'
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -28,6 +33,7 @@ jobs:
   build:
     name: Build ${{ matrix.runtime }} ${{ matrix.version }}
     runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
       matrix:
@@ -35,9 +41,15 @@ jobs:
           - runtime: go
             version: '1.23'
             env_flag: BUILD_GO
+            experimental: false
           - runtime: rust
             version: '1.82'
             env_flag: BUILD_RUST
+            experimental: false
+          - runtime: nodejs
+            version: '20'
+            env_flag: BUILD_NODEJS
+            experimental: true
 
     steps:
       - name: Checkout repository
@@ -46,8 +58,13 @@ jobs:
       - name: Check if runtime should build
         id: should-build
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            FLAG="${{ matrix.env_flag }}"
+          EXPERIMENTAL="${{ matrix.experimental }}"
+          EVENT="${{ github.event_name }}"
+
+          # Experimental runtimes only build on manual dispatch, not on push
+          if [[ "${EXPERIMENTAL}" == "true" && "${EVENT}" != "workflow_dispatch" ]]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          elif [[ "${EVENT}" == "workflow_dispatch" ]]; then
             VALUE="${{ github.event.inputs[format('build_{0}', matrix.runtime)] }}"
             echo "build=${VALUE:-true}" >> "$GITHUB_OUTPUT"
           else
@@ -76,6 +93,7 @@ jobs:
             -w /workspace \
             -e BUILD_GO=${{ matrix.runtime == 'go' && 'true' || 'false' }} \
             -e BUILD_RUST=${{ matrix.runtime == 'rust' && 'true' || 'false' }} \
+            -e BUILD_NODEJS=${{ matrix.runtime == 'nodejs' && 'true' || 'false' }} \
             -e VERIFY=true \
             wasmhub-builder:latest \
             ./scripts/build-all.sh

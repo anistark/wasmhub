@@ -232,6 +232,14 @@ manifest:
 docker-build-runtimes:
     docker run --rm -v "$(pwd):/workspace" wasmhub-builder ./scripts/build-all.sh
 
+# Build Node.js runtime inside Docker container
+build-nodejs:
+    docker run --rm -v "$(pwd):/workspace" wasmhub-builder ./scripts/build-nodejs.sh
+
+# Build Node.js runtime (skip Docker — assumes correct environment)
+build-nodejs-local:
+    ./scripts/build-nodejs.sh
+
 # Optimize WASM binaries (requires wasm-opt)
 optimize:
     ./scripts/optimize-wasm.sh

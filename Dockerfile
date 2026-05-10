@@ -8,6 +8,7 @@ ARG TINYGO_VERSION=0.34.0
 ARG GO_VERSION=1.23.4
 ARG RUST_VERSION=stable
 ARG WASMRUN_VERSION=0.13.0
+ARG QUICKJS_VERSION=2024-01-13
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV WASI_SDK_PATH=/opt/wasi-sdk
@@ -18,9 +19,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binaryen \
     build-essential \
     ca-certificates \
+    cmake \
     curl \
     git \
     jq \
+    nasm \
+    ninja-build \
+    pkg-config \
+    python3 \
+    python3-pip \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
@@ -49,6 +56,7 @@ RUN echo "WASI SDK: ${WASI_SDK_VERSION}" && \
     echo "TinyGo: $(tinygo version)" && \
     echo "Rust: $(rustc --version)" && \
     echo "Cargo: $(cargo --version)" && \
+    echo "Python: $(python3 --version)" && \
     echo "Wasmrun: $(wasmrun --version 2>/dev/null || echo 'installed')" && \
     echo "wasm32-wasip1 target: $(rustup target list --installed | grep wasm)"
 

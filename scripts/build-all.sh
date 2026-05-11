@@ -6,6 +6,7 @@ PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 BUILD_GO="${BUILD_GO:-true}"
 BUILD_RUST="${BUILD_RUST:-true}"
+BUILD_NODEJS="${BUILD_NODEJS:-false}"
 VERIFY="${VERIFY:-true}"
 
 echo "WasmHub Runtime Builder"
@@ -29,6 +30,16 @@ if [[ "${BUILD_RUST}" == "true" ]]; then
         echo ""
     else
         echo "Skipping Rust: runtimes/rust not found"
+    fi
+fi
+
+if [[ "${BUILD_NODEJS}" == "true" ]]; then
+    if [[ -f "${PROJECT_ROOT}/runtimes/nodejs/main.js" ]]; then
+        echo "Building Node.js runtime..."
+        "${SCRIPT_DIR}/build-nodejs.sh"
+        echo ""
+    else
+        echo "Skipping Node.js: runtimes/nodejs/main.js not found"
     fi
 fi
 

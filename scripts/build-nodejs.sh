@@ -53,6 +53,8 @@ OUTPUT_PATH="${BUILD_DIR}/${OUTPUT_NAME}"
 
 mkdir -p "${BUILD_DIR}" "${RUNTIMES_DIR}"
 
+# ── Download ──────────────────────────────────────────────────────────────────
+
 if [[ "${SKIP_DOWNLOAD}" != "true" ]] || [[ ! -d "${QUICKJS_DIR}" ]]; then
     TARBALL="quickjs-${QUICKJS_VERSION}.tar.xz"
     DOWNLOAD_URL="https://bellard.org/quickjs/${TARBALL}"
@@ -69,56 +71,111 @@ if [[ ! -d "${QUICKJS_DIR}" ]]; then
     exit 1
 fi
 
-echo "Applying WASI patches to QuickJS..."
-"${SCRIPT_DIR}/patch-nodejs.sh" "${QUICKJS_DIR}"
+# ── Native qjsc (for JS bundling) ─────────────────────────────────────────────
+# Build qjsc natively BEFORE applying WASI patches so the host compiler can
+# link against pthreads and other POSIX libs that patches strip out.
 
-echo "Building QuickJS for WASI (Node.js ${NODE_VERSION} compat)..."
+echo "Building native qjsc for JS bundling..."
 pushd "${QUICKJS_DIR}" > /dev/null
-
-WASM_CFLAGS="--target=wasm32-wasi --sysroot=${SYSROOT} -O2 -D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS"
-
-make \
-    CC="${CLANG}" \
-    AR="${AR}" \
-    RANLIB="${RANLIB}" \
-    CFLAGS="${WASM_CFLAGS}" \
-    CONFIG_WASI=y \
-    CONFIG_BIGNUM=y \
-    qjs
-
+make CC=cc CONFIG_BIGNUM=y qjsc 2>&1 | tail -3
 popd > /dev/null
 
-QJS_BINARY="${QUICKJS_DIR}/qjs"
-if [[ ! -f "${QJS_BINARY}" ]]; then
-    echo "Error: QuickJS binary not found after build"
-    exit 1
-fi
+NATIVE_QJSC="${QUICKJS_DIR}/qjsc"
+BUNDLE_C="${BUILD_DIR}/nodejs_bundle.c"
+HAS_BUNDLE=false
 
-# Bundle main.js into the binary via qjsc (compile to bytecode)
-if [[ -f "${QUICKJS_DIR}/qjsc" ]] && [[ -f "${RUNTIMES_DIR}/main.js" ]]; then
-    echo "Bundling runtime entrypoint with qjsc..."
-    "${QUICKJS_DIR}/qjsc" \
-        -o "${BUILD_DIR}/nodejs-main.c" \
-        -m "${RUNTIMES_DIR}/main.js"
-
-    "${CLANG}" \
-        --target=wasm32-wasi \
-        --sysroot="${SYSROOT}" \
-        -O2 \
-        -I "${QUICKJS_DIR}" \
-        "${BUILD_DIR}/nodejs-main.c" \
-        "${QUICKJS_DIR}/libquickjs.a" \
-        -o "${OUTPUT_PATH}" \
-        -lm
+if [[ -f "${NATIVE_QJSC}" ]] && [[ -f "${RUNTIMES_DIR}/main.js" ]]; then
+    echo "Bundling main.js via qjsc..."
+    # -e: emit main() + bytecode to a C file (default is full executable output)
+    # -m: treat input as ES module
+    # -fbignum: match CONFIG_BIGNUM=y used in the WASM build
+    "${NATIVE_QJSC}" -e -fbignum -o "${BUNDLE_C}" -m "${RUNTIMES_DIR}/main.js"
+    HAS_BUNDLE=true
 else
-    cp "${QJS_BINARY}" "${OUTPUT_PATH}"
+    echo "Warning: native qjsc unavailable — building interpreter-only binary"
 fi
+
+# ── WASI patches ─────────────────────────────────────────────────────────────
+
+echo "Applying WASI patches..."
+"${SCRIPT_DIR}/patch-nodejs.sh" "${QUICKJS_DIR}"
+
+# ── Compile QuickJS to WASM ───────────────────────────────────────────────────
+# Compile each source file individually with the WASI clang.
+# - CONFIG_WASI=1 : disables worker threads (CONFIG_WORKER) and pthread includes
+# - CONFIG_BIGNUM=1: enables BigInt/BigFloat support
+# - _WASI_EMULATED_SIGNAL/_WASI_EMULATED_PROCESS_CLOCKS: WASI libc emulation layers
+# - -include wasi_shims.h: stubs popen, fork, setenv, exec*, waitpid without
+#   modifying QuickJS source
+
+echo "Compiling QuickJS for WASI..."
+
+WASI_SHIMS="${RUNTIMES_DIR}/wasi_shims.h"
+
+WASM_CFLAGS=(
+    "--target=wasm32-wasi"
+    "--sysroot=${SYSROOT}"
+    "-O2"
+    "-DCONFIG_BIGNUM=1"
+    "-DCONFIG_WASI=1"
+    "-D_WASI_EMULATED_SIGNAL"
+    "-D_WASI_EMULATED_PROCESS_CLOCKS"
+    "-D_WASI_EMULATED_GETPID"
+    "-DCONFIG_VERSION=\"${QUICKJS_VERSION}\""
+    "-Wno-deprecated-declarations"
+    "-I${RUNTIMES_DIR}/wasi_include"
+    "-I${QUICKJS_DIR}"
+    "-include"
+    "${WASI_SHIMS}"
+)
+
+QJS_SOURCES=(quickjs.c quickjs-libc.c cutils.c libbf.c libregexp.c libunicode.c)
+WASM_OBJS=()
+
+for src in "${QJS_SOURCES[@]}"; do
+    obj="${BUILD_DIR}/${src%.c}.o"
+    echo "  Compiling ${src}..."
+    "${CLANG}" "${WASM_CFLAGS[@]}" -c "${QUICKJS_DIR}/${src}" -o "${obj}"
+    WASM_OBJS+=("${obj}")
+done
+
+if [[ "${HAS_BUNDLE}" == "true" ]]; then
+    echo "  Compiling bundled main.js bytecode..."
+    "${CLANG}" "${WASM_CFLAGS[@]}" -c "${BUNDLE_C}" -o "${BUILD_DIR}/nodejs_bundle.o"
+    WASM_OBJS+=("${BUILD_DIR}/nodejs_bundle.o")
+else
+    echo "  Compiling qjs.c (interpreter entry point)..."
+    "${CLANG}" "${WASM_CFLAGS[@]}" -c "${QUICKJS_DIR}/qjs.c" -o "${BUILD_DIR}/qjs.o"
+    WASM_OBJS+=("${BUILD_DIR}/qjs.o")
+fi
+
+echo "  Compiling WASI link-time stubs..."
+"${CLANG}" "${WASM_CFLAGS[@]}" -c "${RUNTIMES_DIR}/wasi_stubs.c" -o "${BUILD_DIR}/wasi_stubs.o"
+WASM_OBJS+=("${BUILD_DIR}/wasi_stubs.o")
+
+# ── Link ──────────────────────────────────────────────────────────────────────
+
+echo "Linking WASM binary..."
+"${CLANG}" \
+    --target=wasm32-wasi \
+    --sysroot="${SYSROOT}" \
+    "${WASM_OBJS[@]}" \
+    -lwasi-emulated-signal \
+    -lwasi-emulated-process-clocks \
+    -ldl \
+    -lwasi-emulated-getpid \
+    -lm \
+    -o "${OUTPUT_PATH}"
+
+# ── Optimize ──────────────────────────────────────────────────────────────────
 
 if [[ "${OPTIMIZE}" == "true" ]] && command -v wasm-opt &> /dev/null; then
     echo "Optimizing with wasm-opt..."
     wasm-opt -O3 --enable-bulk-memory "${OUTPUT_PATH}" -o "${OUTPUT_PATH}.opt"
     mv "${OUTPUT_PATH}.opt" "${OUTPUT_PATH}"
 fi
+
+# ── Finish ────────────────────────────────────────────────────────────────────
 
 SIZE=$(stat -f%z "${OUTPUT_PATH}" 2>/dev/null || stat -c%s "${OUTPUT_PATH}")
 SHA256=$(shasum -a 256 "${OUTPUT_PATH}" | cut -d' ' -f1)

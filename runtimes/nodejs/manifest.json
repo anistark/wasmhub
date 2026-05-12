@@ -1,0 +1,20 @@
+{
+  "language": "nodejs",
+  "latest": "20",
+  "versions": {
+    "20": {
+      "file": "nodejs-20.wasm",
+      "size": 1360419,
+      "sha256": "9319ca68377582f431f6cf77ed7a01daea0b9a659de88cd1e4e1f98ef09de65d",
+      "released": "2026-05-12T17:01:11Z",
+      "wasi": "wasip1",
+      "features": [
+        "eval",
+        "esm",
+        "filesystem",
+        "stdio",
+        "env"
+      ]
+    }
+  }
+}

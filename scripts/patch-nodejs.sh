@@ -1,15 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Applies WASI-compatibility patches to a QuickJS or Node.js source tree.
-#
-# For Node.js (full build, weeks 11-13): patches configure.py and node.gyp
-# to accept wasi/wasm32 targets, stubs out libuv networking, and removes
-# features that require OS-level threading or process APIs.
-#
-# For QuickJS (current): lightweight patches to ensure WASI compatibility
-# in the Makefile and config headers.
-
 SOURCE_DIR="${1:-}"
 
 if [[ -z "${SOURCE_DIR}" ]] || [[ ! -d "${SOURCE_DIR}" ]]; then
@@ -24,25 +15,21 @@ echo "Patching source at ${SOURCE_DIR}..."
 if [[ -f "${SOURCE_DIR}/Makefile" ]] && grep -q "quickjs" "${SOURCE_DIR}/Makefile" 2>/dev/null; then
     echo "  [quickjs] Detected QuickJS source tree"
 
-    # Ensure CONFIG_WASI path doesn't require unavailable POSIX features
+    # Mark CONFIG_WASI in the Makefile so native `make` invocations also get
+    # the right defaults (workers disabled, pthreads excluded).
     if grep -q "CONFIG_WASI" "${SOURCE_DIR}/Makefile"; then
         echo "  [quickjs] WASI config already present in Makefile"
     else
-        echo "  [quickjs] Adding WASI config guard to Makefile"
-        sed -i 's/^CFLAGS=/CONFIG_WASI?=y\nCFLAGS=/' "${SOURCE_DIR}/Makefile"
-    fi
-
-    # Patch quickjs.h: disable atomics if not available under WASI
-    if [[ -f "${SOURCE_DIR}/quickjs.h" ]]; then
-        sed -i 's/#define JS_HAVE_ATOMICS 1/#ifdef __wasi__\n#undef JS_HAVE_ATOMICS\n#else\n#define JS_HAVE_ATOMICS 1\n#endif/' \
-            "${SOURCE_DIR}/quickjs.h" 2>/dev/null || true
+        echo "  [quickjs] Adding CONFIG_WASI default to Makefile"
+        # GNU sed: insert line before the first CFLAGS= assignment
+        sed -i '/^CFLAGS=/i CONFIG_WASI?=y' "${SOURCE_DIR}/Makefile"
     fi
 
     echo "  [quickjs] Patches applied"
     exit 0
 fi
 
-# ── Node.js patches (for the full Node.js build, weeks 11-13) ───────────────
+# ── Node.js patches (full Node.js build, weeks 11-13) ───────────────────────
 
 if [[ -f "${SOURCE_DIR}/configure.py" ]]; then
     echo "  [nodejs] Detected Node.js source tree"
@@ -60,15 +47,22 @@ if [[ -f "${SOURCE_DIR}/configure.py" ]]; then
         sed -i "s/valid_arch = \[/valid_arch = ['wasm32',/" "${SOURCE_DIR}/configure.py" || true
     fi
 
-    # node.gyp: add wasi conditions for build flags
+    # node.gyp: disable V8 JIT tiers that require mmap(PROT_EXEC)
     if [[ -f "${SOURCE_DIR}/node.gyp" ]] && ! grep -q "OS==\"wasi\"" "${SOURCE_DIR}/node.gyp"; then
-        echo "  [nodejs] Patching node.gyp: add wasi conditions"
-        # Disable V8 JIT under WASI (no mmap for executable pages)
-        sed -i "s/'OS==\"linux\"'/'OS==\"linux\"', ['OS==\"wasi\"', {\n          'v8_enable_turbofan%': 0,\n          'v8_enable_maglev%': 0,\n        }],/" \
-            "${SOURCE_DIR}/node.gyp" 2>/dev/null || true
+        echo "  [nodejs] Patching node.gyp: disable V8 JIT for WASI"
+        python3 - "${SOURCE_DIR}/node.gyp" <<'PYEOF'
+import re, sys
+content = open(sys.argv[1]).read()
+wasi_condition = """['OS=="wasi"', {
+          'v8_enable_turbofan%': 0,
+          'v8_enable_maglev%': 0,
+        }],"""
+content = re.sub(r"('OS==\"linux\"')", r"\1, " + wasi_condition.replace('\n', '\n          '), content, count=1)
+open(sys.argv[1], 'w').write(content)
+PYEOF
     fi
 
-    # libuv: create a minimal WASI event loop stub if not present
+    # libuv: minimal WASI event loop stub (no epoll/kqueue; networking unsupported)
     UV_WASI_STUB="${SOURCE_DIR}/deps/uv/src/wasi.c"
     if [[ ! -f "${UV_WASI_STUB}" ]]; then
         echo "  [nodejs] Creating libuv WASI stub"
@@ -77,38 +71,16 @@ if [[ -f "${SOURCE_DIR}/configure.py" ]]; then
 #if defined(__wasi__)
 #include "uv.h"
 #include <errno.h>
+#include <string.h>
 
-// Minimal WASI event loop — no epoll/kqueue, single-tick only.
-// Networking and async I/O are not available under WASI Preview 1.
-
-int uv_loop_init(uv_loop_t* loop) {
-    memset(loop, 0, sizeof(*loop));
-    return 0;
-}
-
-int uv_run(uv_loop_t* loop, uv_run_mode mode) {
-    return 0;
-}
-
-void uv_stop(uv_loop_t* loop) {}
-
-int uv_loop_close(uv_loop_t* loop) {
-    return 0;
-}
-
-int uv_tcp_init(uv_loop_t* loop, uv_tcp_t* handle) {
-    return UV_ENOSYS;
-}
-
-int uv_listen(uv_stream_t* stream, int backlog, uv_connection_cb cb) {
-    return UV_ENOSYS;
-}
-
-int uv_tcp_connect(uv_connect_t* req, uv_tcp_t* handle,
-                   const struct sockaddr* addr, uv_connect_cb cb) {
-    return UV_ENOSYS;
-}
-
+int uv_loop_init(uv_loop_t* loop) { memset(loop, 0, sizeof(*loop)); return 0; }
+int uv_run(uv_loop_t* loop, uv_run_mode mode) { (void)loop; (void)mode; return 0; }
+void uv_stop(uv_loop_t* loop) { (void)loop; }
+int uv_loop_close(uv_loop_t* loop) { (void)loop; return 0; }
+int uv_tcp_init(uv_loop_t* loop, uv_tcp_t* handle) { (void)loop; (void)handle; return UV_ENOSYS; }
+int uv_listen(uv_stream_t* stream, int backlog, uv_connection_cb cb) { (void)stream; (void)backlog; (void)cb; return UV_ENOSYS; }
+int uv_tcp_connect(uv_connect_t* req, uv_tcp_t* handle, const struct sockaddr* addr, uv_connect_cb cb)
+{ (void)req; (void)handle; (void)addr; (void)cb; return UV_ENOSYS; }
 #endif /* __wasi__ */
 WASI_STUB
     fi

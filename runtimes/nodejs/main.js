@@ -67,41 +67,46 @@ function echo(args) {
     std.out.flush();
 }
 
-const argv = scriptArgs;
-if (!argv || argv.length < 2) {
-    printUsage();
-    os.exit(0);
-}
-
-switch (argv[1]) {
-    case "version":
-        printVersion();
-        break;
-    case "eval":
-        if (argv.length < 3) {
-            std.err.puts("Error: eval requires a code argument\n");
-            std.err.flush();
-            os.exit(1);
-        }
-        evalCode(argv.slice(2).join(" "));
-        break;
-    case "run":
-        if (argv.length < 3) {
-            std.err.puts("Error: run requires a file path\n");
-            std.err.flush();
-            os.exit(1);
-        }
-        runFile(argv[2]);
-        break;
-    case "env":
-        printEnv();
-        break;
-    case "echo":
-        echo(argv.slice(2));
-        break;
-    default:
-        std.err.puts(`Unknown command: ${argv[1]}\n`);
-        std.err.flush();
+// QuickJS runs the module body during LINKING before C module init_funcs are called,
+// so std.out/std.err are JS_UNDEFINED at that point. Guard the dispatch on std.out
+// being truthy so LINKING succeeds; dispatch runs on the EVALUATION pass.
+if (std.out) {
+    const argv = scriptArgs;
+    if (!argv || argv.length < 2) {
         printUsage();
-        os.exit(1);
+        os.exit(0);
+    }
+
+    switch (argv[1]) {
+        case "version":
+            printVersion();
+            break;
+        case "eval":
+            if (argv.length < 3) {
+                std.err.puts("Error: eval requires a code argument\n");
+                std.err.flush();
+                os.exit(1);
+            }
+            evalCode(argv.slice(2).join(" "));
+            break;
+        case "run":
+            if (argv.length < 3) {
+                std.err.puts("Error: run requires a file path\n");
+                std.err.flush();
+                os.exit(1);
+            }
+            runFile(argv[2]);
+            break;
+        case "env":
+            printEnv();
+            break;
+        case "echo":
+            echo(argv.slice(2));
+            break;
+        default:
+            std.err.puts(`Unknown command: ${argv[1]}\n`);
+            std.err.flush();
+            printUsage();
+            os.exit(1);
+    }
 }

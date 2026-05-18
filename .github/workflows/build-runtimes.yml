@@ -21,9 +21,9 @@ on:
         default: 'true'
         type: boolean
       build_nodejs:
-        description: 'Build Node.js runtime (experimental)'
+        description: 'Build Node.js runtime'
         required: false
-        default: 'false'
+        default: 'true'
         type: boolean
 
 env:
@@ -49,7 +49,7 @@ jobs:
           - runtime: nodejs
             version: '20'
             env_flag: BUILD_NODEJS
-            experimental: true
+            experimental: false
 
     steps:
       - name: Checkout repository

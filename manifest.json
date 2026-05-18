@@ -1,6 +1,6 @@
 {
-  "version": "0.0.2",
-  "build_date": "2026-02-07T07:04:08Z",
+  "version": "0.1.5",
+  "build_date": "2026-05-18T07:23:54Z",
   "languages": {
     "go": {
       "latest": "1.23",
@@ -9,6 +9,14 @@
       ],
       "source": "https://go.dev/",
       "license": "BSD-3-Clause"
+    },
+    "nodejs": {
+      "latest": "20",
+      "versions": [
+        "20"
+      ],
+      "source": "https://nodejs.org/",
+      "license": "MIT"
     },
     "rust": {
       "latest": "1.82",

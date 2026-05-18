@@ -89,7 +89,7 @@ if [[ -f "${NATIVE_QJSC}" ]] && [[ -f "${RUNTIMES_DIR}/main.js" ]]; then
     # -e: emit main() + bytecode to a C file (default is full executable output)
     # -m: treat input as ES module
     # -fbignum: match CONFIG_BIGNUM=y used in the WASM build
-    "${NATIVE_QJSC}" -e -fbignum -o "${BUNDLE_C}" -m "${RUNTIMES_DIR}/main.js"
+    "${NATIVE_QJSC}" -e -o "${BUNDLE_C}" -m "${RUNTIMES_DIR}/main.js"
     HAS_BUNDLE=true
 else
     echo "Warning: native qjsc unavailable — building interpreter-only binary"
@@ -165,6 +165,7 @@ echo "Linking WASM binary..."
     -ldl \
     -lwasi-emulated-getpid \
     -lm \
+    -Wl,-z,stack-size=8388608 \
     -o "${OUTPUT_PATH}"
 
 # ── Optimize ──────────────────────────────────────────────────────────────────

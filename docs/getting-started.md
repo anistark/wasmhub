@@ -22,7 +22,7 @@ This installs the `wasmhub` binary. Run `wasmhub --help` to verify.
 
 ```toml
 [dependencies]
-wasmhub = "0.1"
+wasmhub = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -36,6 +36,8 @@ wasmhub = { version = "0.1", features = ["progress"] }
 
 ```sh
 wasmhub get go 1.23
+# or try Node.js (alpha)
+wasmhub get nodejs 20
 ```
 
 What happens:

@@ -31,7 +31,7 @@ A centralized, open-source repository providing **versioned WASM language runtim
 ```toml
 # Cargo.toml
 [dependencies]
-wasmhub = "0.1"
+wasmhub = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -80,7 +80,7 @@ const wasmBytes = await response.arrayBuffer();
 
 ## 🌟 Features
 
-- ✅ **Multi-language support** — Go, Rust (more coming soon)
+- ✅ **Multi-language support** — Go, Rust, Node.js (more coming soon)
 - ✅ **Version management** — Pin to specific versions
 - ✅ **Smart caching** — Download once, use forever
 - ✅ **Type-safe API** — Rust library with compile-time guarantees
@@ -97,12 +97,12 @@ const wasmBytes = await response.arrayBuffer();
 |----------|----------|------|--------|-------|
 | **Go** | 1.23 | 261 KB | ✅ Available | Built with TinyGo, supports filesystem, env, args, stdio |
 | **Rust** | 1.82 | 76 KB | ✅ Available | Full std library support with wasm32-wasip1 target |
-| **Node.js** | — | — | 🔜 Coming Soon | — |
+| **Node.js** | 20 | — | 🚧 Alpha | Built with QuickJS (ES2020), supports eval, run, stdio, env, filesystem via WASI |
 | **Python** | — | — | 🔜 Coming Soon | — |
 | **Ruby** | — | — | 🔜 Coming Soon | — |
 | **PHP** | — | — | 🔜 Coming Soon | — |
 
-Both available runtimes target **WASI Preview 1** (`wasip1`).
+All three runtimes target **WASI Preview 1** (`wasip1`). Node.js v20 is in alpha — size will be updated on release.
 
 *More languages and versions coming soon! Contributions welcome.* ✨
 

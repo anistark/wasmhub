@@ -5,11 +5,11 @@ layout: libdoc_page.liquid
 permalink: index.html
 ---
 
-**Open-source WASM Hub of language runtimes.** Download and manage versioned WebAssembly runtimes for Go, Rust, and more — usable as a Rust library, a CLI tool, or via CDN.
+**Open-source WASM Hub of language runtimes.** Download and manage versioned WebAssembly runtimes for Go, Rust, Node.js, and more — usable as a Rust library, a CLI tool, or via CDN.
 
 ## Why WasmHub?
 
-- **Multi-language** — Go and Rust today; Node.js, Python, Ruby, PHP planned
+- **Multi-language** — Go, Rust, and Node.js (alpha) today; Python, Ruby, PHP planned
 - **Smart caching** — download once, use forever
 - **Type-safe library** — Rust API with compile-time guarantees
 - **Multi-CDN fallback** — GitHub Releases + jsDelivr with automatic failover
@@ -29,7 +29,7 @@ As a library:
 
 ```toml
 [dependencies]
-wasmhub = "0.1"
+wasmhub = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 

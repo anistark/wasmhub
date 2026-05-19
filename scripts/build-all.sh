@@ -6,7 +6,7 @@ PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 
 BUILD_GO="${BUILD_GO:-true}"
 BUILD_RUST="${BUILD_RUST:-true}"
-BUILD_NODEJS="${BUILD_NODEJS:-false}"
+BUILD_NODEJS="${BUILD_NODEJS:-true}"
 VERIFY="${VERIFY:-true}"
 
 echo "WasmHub Runtime Builder"

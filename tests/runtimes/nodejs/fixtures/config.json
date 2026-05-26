@@ -1,0 +1,7 @@
+{
+  "name": "wasmhub-nodejs-test",
+  "version": "1.0.0",
+  "limits": {
+    "maxItems": 100
+  }
+}

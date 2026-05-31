@@ -4,16 +4,29 @@
   "versions": {
     "20": {
       "file": "nodejs-20.wasm",
-      "size": 1115198,
-      "sha256": "772183f837a03b8fdf873cd2f696a26997ff1d657ced7d798b10b970de87cd73",
-      "released": "2026-05-18T06:52:50Z",
+      "size": 1157792,
+      "sha256": "ac09e0b21cb06f358f523c71fbebf1fef769dd4e6110ab48da9361bfa25a13a9",
+      "released": "2026-05-31T10:30:00Z",
       "wasi": "wasip1",
       "features": [
         "eval",
         "esm",
+        "require",
+        "commonjs",
         "filesystem",
         "stdio",
-        "env"
+        "env",
+        "path",
+        "fs",
+        "os",
+        "process",
+        "timers",
+        "async",
+        "buffer",
+        "events",
+        "util",
+        "assert",
+        "stream"
       ]
     }
   }

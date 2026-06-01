@@ -38,16 +38,26 @@ eleventyNavigation:
 - ES2020: async/await, optional chaining, nullish coalescing, BigInt
 - **CommonJS `require()`** with relative paths (`./foo`), absolute paths (`/abs`), JSON imports, `package.json` `main` resolution, and `node_modules` lookup walking up the directory tree
 - `module.exports`, `exports`, `__filename`, `__dirname`, `require.cache`, `require.resolve`, `require.main`
-- **Built-in modules:** `path`, `fs`, `os` (also under the `node:` prefix)
+- **Built-in modules:** `path`, `fs`, `os`, `buffer`, `events`, `util`, `assert`, `stream` (also under the `node:` prefix)
+- **`events`** — full `EventEmitter` (`on`/`once`/`off`/`prependListener`/`removeAllListeners`/`emit`/`listeners`/`listenerCount`/`eventNames`, the `error` special-case, `newListener`/`removeListener` meta-events, static `EventEmitter.once`)
+- **`util`** — `format`, `inspect`, `inherits`, `promisify`, `callbackify`, `deprecate`, `debuglog`, `isDeepStrictEqual`, `types.*`, `TextEncoder`/`TextDecoder`
+- **`assert`** — `ok`/`equal`/`strictEqual`/`deepStrictEqual`/`throws`/`rejects`/`ifError`/`match`/… plus `assert.strict` and `AssertionError`
+- **`stream`** — `Readable` (incl. `Readable.from`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline`, `finished`, `.pipe()`
+- **`Buffer`** — full `Uint8Array`-subclass implementation: `from`/`alloc`/`allocUnsafe`/`concat`/`isBuffer`/`byteLength`/`compare`, `toString`/`write`/`slice`/`copy`/`fill`/`equals`/`indexOf`/`includes`, and fixed-width int/float accessors (`readUInt32BE`, `writeDoubleLE`, …). Encodings: `utf8`, `hex`, `base64`, `base64url`, `latin1`, `ascii`, `utf16le`
+- **`TextEncoder` / `TextDecoder`** (utf-8), plus `atob` / `btoa` globals
+- **Binary file I/O:** `fs.readFileSync(path)` returns a `Buffer` (or a string when an encoding is given); `fs.writeFileSync` / `appendFileSync` accept a `Buffer`/`Uint8Array` or string
 - **Globals:** `process` (`argv`, `env`, `cwd()`, `exit()`, `platform`, `stdout.write`, `stderr.write`, `nextTick`, `hrtime`), `global`, `console`
+- **Timers & event loop:** `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `setImmediate`, `clearImmediate`, `queueMicrotask`, and a deferred `process.nextTick` — driven by the QuickJS event loop. `async`/`await`, Promise chains, and timer callbacks resolve after the entry script returns and the loop drains.
 
 ## Limitations
 
 - No networking (WASI Preview 1 has no socket API)
 - No worker threads
 - No native addons (.node files)
-- `fs.readFileSync` returns a string (no Buffer); binary reads not yet supported
-- Built-in modules cover only common synchronous APIs — most of `fs` (streams, async) and other modules (`crypto`, `http`, `url`, `stream`, …) are not implemented
+- Built-in modules cover common APIs but not everything — `crypto`, `http`/`https`/`net` (no sockets under WASI), `url`, `querystring`, `zlib`, `child_process`, `worker_threads` are not implemented; `fs` is synchronous-only (no callback/promise API, no `fs.createReadStream`)
+- `Buffer` covers the common API but not everything (e.g. `swap16`/`swap32`, `BigInt64` accessors); `TextDecoder` is utf-8 only
+- `stream` is a pragmatic subset (no full backpressure/highWaterMark semantics, no async iterators); `util.inspect` output approximates Node's but is not byte-identical
+- Timers return a numeric id (browser-style), not a Node `Timeout` object — `.ref()`/`.unref()` are unavailable. `process.nextTick` is a microtask (no separate higher-priority queue), and the trailing-args forms are supported
 
 ## Install
 
@@ -136,13 +146,12 @@ Three non-obvious build issues were debugged and fixed:
 - **`-fbignum` incompatibility** — `qjsc -fbignum` emits BigNum intrinsics that fail in WASI; removed.
 - **Module linking phase** — QuickJS runs the module body during _linking_ before C module `init_func`s run, so `std.out` is `undefined` at that point; guarded with `if (std.out)`.
 
-See `plan/NODEJS_EXCEPTION_DEBUG.md` for the full root-cause analysis.
-
 ## Roadmap
 
 - [ ] Node.js v22 and v24 builds
 - [x] `node:fs` shim via WASI filesystem APIs (minimal synchronous subset)
 - [x] CommonJS `require()` support — implemented in `main.js` (no bundler pre-pass needed)
-- [ ] `Buffer` and binary `fs` reads
-- [ ] `crypto`, `url`, `stream`, `events` built-ins
-- [ ] Event-loop driven `setTimeout` / `setInterval` exposed as globals
+- [x] `Buffer` and binary `fs` reads — `Uint8Array`-subclass `Buffer`, `TextEncoder`/`TextDecoder`, and `fs.readFileSync`→`Buffer`
+- [x] `events`, `util`, `assert`, `stream` built-ins
+- [ ] `crypto`, `url`, `querystring`, `zlib` built-ins
+- [x] Event-loop driven `setTimeout` / `setInterval` exposed as globals (plus `setImmediate`, `queueMicrotask`, deferred `process.nextTick`)

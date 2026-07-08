@@ -80,7 +80,10 @@ EOF
            --arg ver "${VERSION}" \
            '.versions[$ver] = $newver | .latest = $ver' \
            "${MANIFEST_FILE}" > "${TMP_FILE}"
+        # mktemp creates files as 600; keep the manifest world-readable so the
+        # CI runner user can read it after the container (root) writes it
         mv "${TMP_FILE}" "${MANIFEST_FILE}"
+        chmod 644 "${MANIFEST_FILE}"
     else
         echo "Warning: jq not found, cannot update existing manifest"
         echo "New version metadata:"

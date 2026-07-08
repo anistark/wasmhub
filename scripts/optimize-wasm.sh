@@ -102,7 +102,9 @@ for manifest in "${RUNTIME_DIR_PATH}"/*/manifest.json; do
                     else . end
                 )
             ' "${manifest}" > "${TMP}"
+            # mktemp creates files as 600; keep the manifest world-readable
             mv "${TMP}" "${manifest}"
+            chmod 644 "${manifest}"
         done
     fi
 done

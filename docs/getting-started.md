@@ -22,14 +22,14 @@ This installs the `wasmhub` binary. Run `wasmhub --help` to verify.
 
 ```toml
 [dependencies]
-wasmhub = "0.2"
+wasmhub = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
 For download progress bars, enable the `progress` feature:
 
 ```toml
-wasmhub = { version = "0.1", features = ["progress"] }
+wasmhub = { version = "0.3", features = ["progress"] }
 ```
 
 ## Your first runtime

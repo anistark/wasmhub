@@ -217,7 +217,8 @@ impl RuntimeLoader {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(data);
-        format!("{:x}", hasher.finalize())
+        let hash = hasher.finalize();
+        hash.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
     pub async fn list_available(&self) -> Result<GlobalManifest> {
@@ -432,7 +433,10 @@ mod tests {
         let loader = RuntimeLoader::new().unwrap();
         let data = b"test data";
         let hash = loader.compute_hash(data);
-        assert_eq!(hash.len(), 64);
+        assert_eq!(
+            hash,
+            "916f0027a575074ce72a331777c3478d6513f786a591bd892da1a577bf2335f9"
+        );
     }
 
     #[test]

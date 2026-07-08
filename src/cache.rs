@@ -137,8 +137,9 @@ impl CacheManager {
             hasher.update(&buffer[..n]);
         }
 
+        // sha2 0.11 output no longer implements LowerHex, so format per byte
         let hash = hasher.finalize();
-        Ok(format!("{hash:x}"))
+        Ok(hash.iter().map(|byte| format!("{byte:02x}")).collect())
     }
 
     pub fn verify_integrity(&self, runtime: &Runtime, expected_sha256: &str) -> Result<()> {
@@ -269,7 +270,10 @@ mod tests {
         let hash2 = CacheManager::compute_sha256(&file_path).unwrap();
 
         assert_eq!(hash1, hash2);
-        assert_eq!(hash1.len(), 64);
+        assert_eq!(
+            hash1,
+            "f7eb7961d8a233e6256d3a6257548bbb9293c3a08fb3574c88c7d6b429dbb9f5"
+        );
     }
 
     #[test]

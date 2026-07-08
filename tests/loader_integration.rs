@@ -25,7 +25,8 @@ fn fake_wasm_binary() -> Vec<u8> {
 fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
-    format!("{:x}", hasher.finalize())
+    let hash = hasher.finalize();
+    hash.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn make_runtime_manifest(lang: &str, version: &str, wasm: &[u8], base_url: &str) -> String {

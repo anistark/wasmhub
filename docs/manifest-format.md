@@ -51,7 +51,7 @@ A single `manifest.json` at the repo root aggregates every per-language manifest
 
 ```json
 {
-    "version": "0.2.1",
+    "version": "0.3.0",
     "build_date": "2026-02-15T14:00:00Z",
     "languages": {
         "go": {

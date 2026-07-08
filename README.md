@@ -31,7 +31,7 @@ A centralized, open-source repository providing **versioned WASM language runtim
 ```toml
 # Cargo.toml
 [dependencies]
-wasmhub = "0.2"
+wasmhub = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 

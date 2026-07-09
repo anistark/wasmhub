@@ -7,6 +7,7 @@ PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 BUILD_GO="${BUILD_GO:-true}"
 BUILD_RUST="${BUILD_RUST:-true}"
 BUILD_NODEJS="${BUILD_NODEJS:-true}"
+BUILD_SWC="${BUILD_SWC:-true}"
 VERIFY="${VERIFY:-true}"
 
 echo "WasmHub Runtime Builder"
@@ -40,6 +41,16 @@ if [[ "${BUILD_NODEJS}" == "true" ]]; then
         echo ""
     else
         echo "Skipping Node.js: runtimes/nodejs/main.js not found"
+    fi
+fi
+
+if [[ "${BUILD_SWC}" == "true" ]]; then
+    if [[ -d "${PROJECT_ROOT}/runtimes/swc" ]]; then
+        echo "Building swc transpiler..."
+        "${SCRIPT_DIR}/build-swc.sh" "${PROJECT_ROOT}/runtimes/swc"
+        echo ""
+    else
+        echo "Skipping swc: runtimes/swc not found"
     fi
 fi
 

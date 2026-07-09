@@ -10,6 +10,9 @@ pub enum Language {
     Php,
     Go,
     Rust,
+    /// The swc TypeScript transpiler — a tool artifact rather than a language
+    /// runtime: it emits `.js` from `.ts`/`.tsx` for the NodeJs runtime.
+    Swc,
 }
 
 impl Language {
@@ -21,6 +24,7 @@ impl Language {
             Language::Php => "php",
             Language::Go => "go",
             Language::Rust => "rust",
+            Language::Swc => "swc",
         }
     }
 
@@ -32,6 +36,7 @@ impl Language {
             Language::Php,
             Language::Go,
             Language::Rust,
+            Language::Swc,
         ]
     }
 }
@@ -47,6 +52,7 @@ impl FromStr for Language {
             "php" => Ok(Language::Php),
             "go" | "golang" => Ok(Language::Go),
             "rust" | "rs" => Ok(Language::Rust),
+            "swc" => Ok(Language::Swc),
             _ => Err(format!("Unknown language: {s}")),
         }
     }
@@ -107,6 +113,7 @@ mod tests {
         assert_eq!("golang".parse::<Language>().unwrap(), Language::Go);
         assert_eq!("rust".parse::<Language>().unwrap(), Language::Rust);
         assert_eq!("rs".parse::<Language>().unwrap(), Language::Rust);
+        assert_eq!("swc".parse::<Language>().unwrap(), Language::Swc);
 
         assert!("unknown".parse::<Language>().is_err());
         assert!("javascript".parse::<Language>().is_err());
@@ -120,6 +127,7 @@ mod tests {
         assert_eq!(Language::Php.as_str(), "php");
         assert_eq!(Language::Go.as_str(), "go");
         assert_eq!(Language::Rust.as_str(), "rust");
+        assert_eq!(Language::Swc.as_str(), "swc");
     }
 
     #[test]
@@ -160,12 +168,13 @@ mod tests {
     #[test]
     fn test_language_all() {
         let languages = Language::all();
-        assert_eq!(languages.len(), 6);
+        assert_eq!(languages.len(), 7);
         assert!(languages.contains(&Language::NodeJs));
         assert!(languages.contains(&Language::Python));
         assert!(languages.contains(&Language::Ruby));
         assert!(languages.contains(&Language::Php));
         assert!(languages.contains(&Language::Go));
         assert!(languages.contains(&Language::Rust));
+        assert!(languages.contains(&Language::Swc));
     }
 }

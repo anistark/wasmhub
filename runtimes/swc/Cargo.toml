@@ -1,0 +1,30 @@
+[package]
+name = "wasmhub-swc-transpiler"
+version = "73.0.0"
+edition = "2021"
+
+[[bin]]
+name = "swc"
+path = "src/main.rs"
+
+[dependencies]
+swc_core = { version = "73.0.0", features = [
+    "common",
+    "ecma_ast",
+    "ecma_parser",
+    "ecma_parser_typescript",
+    "ecma_transforms",
+    "ecma_transforms_typescript",
+    "ecma_transforms_module",
+    "ecma_transforms_react",
+    "ecma_helpers_inline",
+    "ecma_codegen",
+    "ecma_visit",
+] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

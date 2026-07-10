@@ -25,6 +25,11 @@ on:
         required: false
         default: 'true'
         type: boolean
+      build_swc:
+        description: 'Build swc TypeScript transpiler'
+        required: false
+        default: 'true'
+        type: boolean
 
 env:
   CARGO_TERM_COLOR: always
@@ -49,6 +54,10 @@ jobs:
           - runtime: nodejs
             version: '20'
             env_flag: BUILD_NODEJS
+            experimental: false
+          - runtime: swc
+            version: '73'
+            env_flag: BUILD_SWC
             experimental: false
 
     steps:
@@ -94,6 +103,7 @@ jobs:
             -e BUILD_GO=${{ matrix.runtime == 'go' && 'true' || 'false' }} \
             -e BUILD_RUST=${{ matrix.runtime == 'rust' && 'true' || 'false' }} \
             -e BUILD_NODEJS=${{ matrix.runtime == 'nodejs' && 'true' || 'false' }} \
+            -e BUILD_SWC=${{ matrix.runtime == 'swc' && 'true' || 'false' }} \
             -e VERIFY=true \
             wasmhub-builder:latest \
             ./scripts/build-all.sh

@@ -71,6 +71,12 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --de
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup target add wasm32-wasip1
 
+# Nightly + rust-src: required by build-swc.sh, which rebuilds std with
+# `-Zbuild-std` to produce an MVP-lowered WASM (no post-MVP instructions)
+RUN rustup toolchain install nightly && \
+    rustup component add rust-src --toolchain nightly && \
+    rustup target add wasm32-wasip1 --toolchain nightly
+
 # wasmrun: https://github.com/anistark/wasmrun
 RUN cargo install wasmrun --version ${WASMRUN_VERSION}
 

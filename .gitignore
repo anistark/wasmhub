@@ -1,5 +1,6 @@
 # Rust
 /target
+runtimes/**/target/
 **/*.rs.bk
 *.pdb
 

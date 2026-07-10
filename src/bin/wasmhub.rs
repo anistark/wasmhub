@@ -209,8 +209,8 @@ async fn handle_info(language_str: String, version: Option<String>) -> Result<()
     if let Some(lts) = &info.lts {
         println!("  {}: {}", "LTS".bold(), lts);
     }
-    println!("  {}: {}", "Source".bold(), &info.source);
-    println!("  {}: {}", "License".bold(), &info.license);
+    println!("  {}: {}", "Source".bold(), info.source);
+    println!("  {}: {}", "License".bold(), info.license);
 
     if let Some(ver) = version {
         println!("\n{} {}:\n", "Version Details for".cyan().bold(), ver);
@@ -228,7 +228,7 @@ async fn handle_info(language_str: String, version: Option<String>) -> Result<()
                 ver_info.size as f64 / 1_048_576.0
             );
             println!("  {}: {}", "SHA256".bold(), ver_info.sha256);
-            println!("  {}: {}", "Released".bold(), &ver_info.released);
+            println!("  {}: {}", "Released".bold(), ver_info.released);
             println!("  {}: {}", "WASI".bold(), ver_info.wasi);
             if !ver_info.features.is_empty() {
                 println!("  {}: {}", "Features".bold(), ver_info.features.join(", "));

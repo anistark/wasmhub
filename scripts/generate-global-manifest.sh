@@ -16,6 +16,7 @@ declare -A SOURCES=(
     ["python"]="https://python.org/"
     ["ruby"]="https://www.ruby-lang.org/"
     ["php"]="https://www.php.net/"
+    ["swc"]="https://swc.rs/"
 )
 
 declare -A LICENSES=(
@@ -25,6 +26,7 @@ declare -A LICENSES=(
     ["python"]="PSF-2.0"
     ["ruby"]="BSD-2-Clause"
     ["php"]="PHP-3.01"
+    ["swc"]="Apache-2.0"
 )
 
 if ! command -v jq &> /dev/null; then

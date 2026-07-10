@@ -4,6 +4,7 @@ LABEL maintainer="Ani <github.com/anistark>"
 LABEL description="WasmHub build environment with WASI SDK, TinyGo, and Rust"
 
 ARG WASI_SDK_VERSION=24
+ARG BINARYEN_VERSION=130
 ARG TINYGO_VERSION=0.34.0
 ARG GO_VERSION=1.23.4
 ARG RUST_VERSION=stable
@@ -16,7 +17,6 @@ ENV TINYGO_ROOT=/opt/tinygo
 ENV PATH="${TINYGO_ROOT}/bin:${WASI_SDK_PATH}/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    binaryen \
     build-essential \
     ca-certificates \
     cmake \
@@ -30,6 +30,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     xz-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# Binaryen — from GitHub releases; Debian bookworm's apt package is v108 (2022),
+# which predates the --llvm-memory-copy-fill-lowering pass build-swc.sh needs
+RUN set -eux; \
+    ARCH="$(uname -m)"; \
+    case "$ARCH" in \
+        x86_64)  BN_ARCH="x86_64" ;; \
+        aarch64) BN_ARCH="aarch64" ;; \
+        *) echo "Unsupported arch: $ARCH" && exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${BN_ARCH}-linux.tar.gz" \
+    | tar -xzf - -C /opt \
+    && ln -s "/opt/binaryen-version_${BINARYEN_VERSION}/bin/"* /usr/local/bin/
 
 # WASI SDK — pick the right arch for the container (amd64 or arm64)
 RUN set -eux; \

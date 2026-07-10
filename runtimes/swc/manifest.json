@@ -1,14 +1,19 @@
 {
-    "language": "swc",
-    "latest": "73",
-    "versions": {
-        "73": {
-            "file": "swc-73.wasm",
-            "size": 2669613,
-            "sha256": "69b606a22a848d2d6759e6b97b951e68cb151d05000597f58daabb6e082a9736",
-            "released": "2026-07-09T16:32:30Z",
-            "wasi": "wasip1",
-            "features": ["typescript","tsx","commonjs-output","inline-helpers"]
-        }
+  "language": "swc",
+  "latest": "73",
+  "versions": {
+    "73": {
+      "file": "swc-73.wasm",
+      "size": 2383409,
+      "sha256": "0780011a3d6a08c12d089d085555832beeef6a219bfd0b78ab6c07cbb165e77d",
+      "released": "2026-07-10T06:48:29Z",
+      "wasi": "wasip1",
+      "features": [
+        "typescript",
+        "tsx",
+        "commonjs-output",
+        "inline-helpers"
+      ]
     }
+  }
 }

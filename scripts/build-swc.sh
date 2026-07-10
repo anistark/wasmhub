@@ -96,13 +96,29 @@ fi
 
 cp "${BUILT_WASM}" "${OUTPUT_PATH}"
 
-# NOTE: no --enable-bulk-memory here (unlike build-rust.sh) — the artifact
-# must stay MVP-only, and wasm-opt's default MVP feature set doubles as a
-# validation step: it hard-fails if any post-MVP instruction slipped through.
-if [[ "${OPTIMIZE}" == "true" ]] && command -v wasm-opt &> /dev/null; then
-    echo "Optimizing with wasm-opt (MVP feature set)..."
-    wasm-opt -O3 "${OUTPUT_PATH}" -o "${OUTPUT_PATH}.opt"
+# MVP lowering + validation. Even with -C target-cpu=mvp, the binary picks up
+# memory.copy/memory.fill from rustup's PREBUILT wasi-libc (memcpy, memmove,
+# strdup, ...), which recent toolchains ship compiled with bulk-memory enabled;
+# no RUSTFLAGS can fix precompiled objects. So first lower those ops back to
+# MVP loops (needs binaryen >= 120), then optimize under --mvp-features, which
+# doubles as a validation step: it hard-fails if any post-MVP instruction
+# remains. wasm-opt is mandatory here — without the lowering pass the artifact
+# is NOT MVP-clean and wasmrun's exec mode rejects it at parse time.
+if [[ "${OPTIMIZE}" == "true" ]]; then
+    if ! command -v wasm-opt &> /dev/null; then
+        echo "Error: wasm-opt not found — required to MVP-lower the swc artifact."
+        echo "Install binaryen >= 120, or pass --no-optimize for an unlowered dev build."
+        exit 1
+    fi
+    echo "Lowering bulk-memory ops from wasi-libc to MVP loops..."
+    wasm-opt --enable-bulk-memory-opt --llvm-memory-copy-fill-lowering \
+        "${OUTPUT_PATH}" -o "${OUTPUT_PATH}.lowered"
+    echo "Optimizing with wasm-opt (strict MVP feature set)..."
+    wasm-opt --mvp-features -O3 "${OUTPUT_PATH}.lowered" -o "${OUTPUT_PATH}.opt"
+    rm "${OUTPUT_PATH}.lowered"
     mv "${OUTPUT_PATH}.opt" "${OUTPUT_PATH}"
+else
+    echo "Warning: skipping MVP lowering (--no-optimize) — artifact will contain bulk-memory ops"
 fi
 
 SIZE=$(stat -f%z "${OUTPUT_PATH}" 2>/dev/null || stat -c%s "${OUTPUT_PATH}")

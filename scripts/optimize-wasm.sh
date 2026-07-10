@@ -37,7 +37,16 @@ for wasm in "${RUNTIMES_DIR}"/*/*.wasm; do
 
     if [[ "${SKIP_WASM_OPT}" != "true" ]]; then
         OPTIMIZED="${wasm}.opt"
-        wasm-opt "-${OPT_LEVEL}" --enable-bulk-memory --strip-debug -o "${OPTIMIZED}" "${wasm}"
+        # swc must stay MVP-only for downstream interpreters (see build-swc.sh).
+        # --mvp-features doubles as re-validation, while permissive features here
+        # would let wasm-opt reintroduce post-MVP ops (it rewrites shift patterns
+        # into sign-extension instructions, which broke the v0.3.1 swc asset)
+        if [[ "${wasm}" == */swc/* ]]; then
+            FEATURE_FLAGS=(--mvp-features)
+        else
+            FEATURE_FLAGS=(--enable-bulk-memory)
+        fi
+        wasm-opt "-${OPT_LEVEL}" "${FEATURE_FLAGS[@]}" --strip-debug -o "${OPTIMIZED}" "${wasm}"
 
         SIZE_AFTER=$(stat -f%z "${OPTIMIZED}" 2>/dev/null || stat -c%s "${OPTIMIZED}")
         SAVINGS=$(( (SIZE_BEFORE - SIZE_AFTER) * 100 / SIZE_BEFORE ))

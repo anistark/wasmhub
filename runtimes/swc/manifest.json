@@ -4,9 +4,9 @@
   "versions": {
     "73": {
       "file": "swc-73.wasm",
-      "size": 2383409,
-      "sha256": "0780011a3d6a08c12d089d085555832beeef6a219bfd0b78ab6c07cbb165e77d",
-      "released": "2026-07-10T06:48:29Z",
+      "size": 2355522,
+      "sha256": "6a24ed9f2f68d61cfe97e955691abc7108928db8e817519e7a9f32fa5c1d3995",
+      "released": "2026-07-10T08:19:30Z",
       "wasi": "wasip1",
       "features": [
         "typescript",

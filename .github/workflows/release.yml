@@ -63,10 +63,11 @@ jobs:
         run: |
           mkdir -p release-assets
 
-          # Copy WASM binaries and compressed variants
-          find runtimes -name "*.wasm" -exec cp {} release-assets/ \;
-          find runtimes -name "*.wasm.gz" -exec cp {} release-assets/ \; 2>/dev/null || true
-          find runtimes -name "*.wasm.br" -exec cp {} release-assets/ \; 2>/dev/null || true
+          # Copy WASM binaries and compressed variants; exclude cargo build
+          # intermediates under runtimes/*/target/ (unoptimized, not artifacts)
+          find runtimes -name "*.wasm" -not -path "*/target/*" -exec cp {} release-assets/ \;
+          find runtimes -name "*.wasm.gz" -not -path "*/target/*" -exec cp {} release-assets/ \; 2>/dev/null || true
+          find runtimes -name "*.wasm.br" -not -path "*/target/*" -exec cp {} release-assets/ \; 2>/dev/null || true
 
           # Copy per-runtime manifests with language prefix to avoid naming conflicts
           for manifest in runtimes/*/manifest.json; do

@@ -110,6 +110,7 @@ if [[ "${OPTIMIZE}" == "true" ]]; then
         echo "Install binaryen >= 120, or pass --no-optimize for an unlowered dev build."
         exit 1
     fi
+    echo "Using $(command -v wasm-opt) ($(wasm-opt --version))"
     echo "Lowering bulk-memory ops from wasi-libc to MVP loops..."
     wasm-opt --enable-bulk-memory-opt --llvm-memory-copy-fill-lowering \
         "${OUTPUT_PATH}" -o "${OUTPUT_PATH}.lowered"

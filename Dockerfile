@@ -43,6 +43,9 @@ RUN set -eux; \
     curl -fsSL "https://github.com/WebAssembly/binaryen/releases/download/version_${BINARYEN_VERSION}/binaryen-version_${BINARYEN_VERSION}-${BN_ARCH}-linux.tar.gz" \
     | tar -xzf - -C /opt \
     && ln -s "/opt/binaryen-version_${BINARYEN_VERSION}/bin/"* /usr/local/bin/
+# Must come FIRST in PATH: TinyGo bundles its own older wasm-opt in bin/,
+# which would otherwise shadow this one
+ENV PATH="/opt/binaryen-version_${BINARYEN_VERSION}/bin:${PATH}"
 
 # WASI SDK — pick the right arch for the container (amd64 or arm64)
 RUN set -eux; \

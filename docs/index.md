@@ -9,7 +9,7 @@ permalink: index.html
 
 ## Why WasmHub?
 
-- **Multi-language** — Go, Rust, and Node.js (alpha) today; Python, Ruby, PHP planned
+- **Multi-language** — Go, Rust, Node.js (alpha), and the swc TypeScript transpiler (alpha) today; Python, Ruby, PHP planned
 - **Smart caching** — download once, use forever
 - **Type-safe library** — Rust API with compile-time guarantees
 - **Multi-CDN fallback** — GitHub Releases + jsDelivr with automatic failover

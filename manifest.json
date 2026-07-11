@@ -1,6 +1,6 @@
 {
-  "version": "0.3.1",
-  "build_date": "2026-07-10T07:34:12Z",
+  "version": "0.3.2",
+  "build_date": "2026-07-11T07:35:04Z",
   "languages": {
     "go": {
       "latest": "1.23",

@@ -4,9 +4,9 @@
   "versions": {
     "20": {
       "file": "nodejs-20.wasm",
-      "size": 1157792,
-      "sha256": "ac09e0b21cb06f358f523c71fbebf1fef769dd4e6110ab48da9361bfa25a13a9",
-      "released": "2026-05-31T10:30:00Z",
+      "size": 1170093,
+      "sha256": "ebe074869109ee08acaf1130f87950e00aac2cddb889dd6b92db428946d9aed7",
+      "released": "2026-07-11T07:35:04Z",
       "wasi": "wasip1",
       "features": [
         "eval",
@@ -26,7 +26,10 @@
         "events",
         "util",
         "assert",
-        "stream"
+        "stream",
+        "url",
+        "crypto",
+        "structured-clone"
       ]
     }
   }

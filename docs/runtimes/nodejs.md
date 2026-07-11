@@ -48,13 +48,14 @@ eleventyNavigation:
 - **Binary file I/O:** `fs.readFileSync(path)` returns a `Buffer` (or a string when an encoding is given); `fs.writeFileSync` / `appendFileSync` accept a `Buffer`/`Uint8Array` or string
 - **Globals:** `process` (`argv`, `env`, `cwd()`, `exit()`, `platform`, `stdout.write`, `stderr.write`, `nextTick`, `hrtime`), `global`, `console`
 - **Timers & event loop:** `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `setImmediate`, `clearImmediate`, `queueMicrotask`, and a deferred `process.nextTick` — driven by the QuickJS event loop. `async`/`await`, Promise chains, and timer callbacks resolve after the entry script returns and the loop drains.
+- **Web platform globals:** `URL` / `URLSearchParams` (WHATWG parsing, relative resolution against a base, `searchParams` kept in sync with the URL), `crypto.getRandomValues` / `crypto.randomUUID` (entropy from the WASI `random_get` syscall via `os.getentropy`), `structuredClone` (cycles, `Map`/`Set`/`Date`/`RegExp`/`ArrayBuffer`/TypedArrays; functions and symbols throw `DataCloneError`), and `fetch` — defined but always rejecting with a clear network-unsupported error (`code: 'ERR_NETWORK_UNSUPPORTED'`) rather than a bare `ReferenceError`
 
 ## Limitations
 
-- No networking (WASI Preview 1 has no socket API)
+- No networking (WASI Preview 1 has no socket API); `fetch` exists but rejects with a clear error
 - No worker threads
 - No native addons (.node files)
-- Built-in modules cover common APIs but not everything — `crypto`, `http`/`https`/`net` (no sockets under WASI), `url`, `querystring`, `zlib`, `child_process`, `worker_threads` are not implemented; `fs` is synchronous-only (no callback/promise API, no `fs.createReadStream`)
+- Built-in modules cover common APIs but not everything — `require('crypto')`/`require('url')` are not implemented as modules (the `crypto`/`URL` *globals* are — see above), and `http`/`https`/`net` (no sockets under WASI), `querystring`, `zlib`, `child_process`, `worker_threads` are not implemented; `fs` is synchronous-only (no callback/promise API, no `fs.createReadStream`)
 - `Buffer` covers the common API but not everything (e.g. `swap16`/`swap32`, `BigInt64` accessors); `TextDecoder` is utf-8 only
 - `stream` is a pragmatic subset (no full backpressure/highWaterMark semantics, no async iterators); `util.inspect` output approximates Node's but is not byte-identical
 - Timers return a numeric id (browser-style), not a Node `Timeout` object — `.ref()`/`.unref()` are unavailable. `process.nextTick` is a microtask (no separate higher-priority queue), and the trailing-args forms are supported

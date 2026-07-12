@@ -25,6 +25,61 @@ if [[ -f "${SOURCE_DIR}/Makefile" ]] && grep -q "quickjs" "${SOURCE_DIR}/Makefil
         sed -i '/^CFLAGS=/i CONFIG_WASI?=y' "${SOURCE_DIR}/Makefile"
     fi
 
+    # Expose entropy to JS as os.getentropy(len) → ArrayBuffer. wasi-libc
+    # implements getentropy() via the WASI random_get syscall, which is what
+    # backs crypto.getRandomValues in main.js.
+    if grep -q "js_os_getentropy" "${SOURCE_DIR}/quickjs-libc.c"; then
+        echo "  [quickjs] getentropy binding already present"
+    else
+        echo "  [quickjs] Adding os.getentropy binding to quickjs-libc.c"
+        python3 - "${SOURCE_DIR}/quickjs-libc.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+content = open(path).read()
+
+func = '''
+/* wasmhub: entropy for crypto.getRandomValues — getentropy() is wasi-libc's
+   wrapper over the WASI random_get syscall (max 256 bytes per call). */
+extern int getentropy(void *buffer, size_t len);
+
+static JSValue js_os_getentropy(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    uint32_t len;
+    uint8_t *buf;
+    size_t off, chunk;
+    JSValue ab;
+    if (JS_ToUint32(ctx, &len, argv[0]))
+        return JS_EXCEPTION;
+    if (len > 65536)
+        return JS_ThrowRangeError(ctx, "getentropy: length must not exceed 65536");
+    buf = js_malloc(ctx, len ? len : 1);
+    if (!buf)
+        return JS_EXCEPTION;
+    for (off = 0; off < len; off += chunk) {
+        chunk = len - off > 256 ? 256 : len - off;
+        if (getentropy(buf + off, chunk)) {
+            js_free(ctx, buf);
+            return JS_ThrowInternalError(ctx, "getentropy failed");
+        }
+    }
+    ab = JS_NewArrayBufferCopy(ctx, buf, len);
+    js_free(ctx, buf);
+    return ab;
+}
+
+'''
+
+anchor = "static const JSCFunctionListEntry js_os_funcs[] = {"
+if anchor not in content:
+    sys.exit("quickjs-libc.c: js_os_funcs anchor not found")
+entry = '    JS_CFUNC_DEF("getentropy", 1, js_os_getentropy ),'
+content = content.replace(anchor, func + anchor + "\n" + entry, 1)
+open(path, "w").write(content)
+PYEOF
+    fi
+
     echo "  [quickjs] Patches applied"
     exit 0
 fi

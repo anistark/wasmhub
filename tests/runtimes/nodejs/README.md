@@ -14,6 +14,7 @@ fixtures/
   buffer.js           # Buffer + TextEncoder/Decoder + binary fs.readFileSync
   base.js             # events (EventEmitter) + util + assert
   stream.js           # stream — Readable.from/Transform/Writable/PassThrough/pipe
+  webglobals.js       # URL/URLSearchParams, structuredClone, crypto, fetch stub
   node_modules/
     greet/
       package.json    # main: src/greet.js
@@ -153,4 +154,18 @@ callbackify=10
 ```
 passthrough=hello world
 pipe=FOO|BAR|BAZ|!
+```
+
+### Web globals (`webglobals.js`)
+
+Exercises `URL`/`URLSearchParams` (parsing, relative resolution, searchParams
+sync), `structuredClone` (cycles, Map/Set/Date/TypedArray, DataCloneError),
+`crypto.getRandomValues`/`randomUUID`, and the `fetch` stub (rejects with a
+clear network-unsupported message on WASI). Output is deterministic and
+identical under real Node — diff the two:
+
+```sh
+node tests/runtimes/nodejs/fixtures/webglobals.js > expected.txt
+wasmrun exec --dir tests/runtimes/nodejs/fixtures \
+  runtimes/nodejs/nodejs-20.wasm -- run tests/runtimes/nodejs/fixtures/webglobals.js | diff expected.txt -
 ```

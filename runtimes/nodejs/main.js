@@ -1305,6 +1305,559 @@ const eventsModule = EventEmitter;
 const assertModule = assert;
 const streamModule = Stream;
 
+// ═══ Web platform globals (URL, URLSearchParams, crypto, structuredClone) ════
+
+// application/x-www-form-urlencoded serialization (URLSearchParams).
+function formEncode(s) {
+    return encodeURIComponent(String(s))
+        .replace(/[!'()~]/g, c => '%' + c.charCodeAt(0).toString(16).toUpperCase())
+        .replace(/%20/g, '+');
+}
+
+function formDecode(s) {
+    try {
+        return decodeURIComponent(String(s).replace(/\+/g, ' '));
+    } catch (_) {
+        return String(s).replace(/\+/g, ' ');
+    }
+}
+
+class URLSearchParams {
+    constructor(init) {
+        this._pairs = [];
+        this._url = null;
+        if (init == null) return;
+        if (typeof init === 'string') {
+            this._parseQuery(init.startsWith('?') ? init.slice(1) : init);
+        } else if (init instanceof URLSearchParams) {
+            this._pairs = init._pairs.map(p => [p[0], p[1]]);
+        } else if (typeof init[Symbol.iterator] === 'function') {
+            for (const pair of init) {
+                if (pair == null || pair.length !== 2) {
+                    throw new TypeError('URLSearchParams: each init pair must have exactly two elements');
+                }
+                this._pairs.push([String(pair[0]), String(pair[1])]);
+            }
+        } else if (typeof init === 'object') {
+            for (const k of Object.keys(init)) {
+                this._pairs.push([k, String(init[k])]);
+            }
+        } else {
+            throw new TypeError('URLSearchParams: unsupported init value');
+        }
+    }
+
+    _parseQuery(qs) {
+        for (const part of String(qs).split('&')) {
+            if (!part) continue;
+            const i = part.indexOf('=');
+            if (i < 0) this._pairs.push([formDecode(part), '']);
+            else this._pairs.push([formDecode(part.slice(0, i)), formDecode(part.slice(i + 1))]);
+        }
+    }
+
+    // Write the serialized form back into the owning URL's query (if any).
+    _sync() {
+        if (this._url) this._url._query = this._pairs.length ? this.toString() : null;
+    }
+
+    append(name, value) {
+        this._pairs.push([String(name), String(value)]);
+        this._sync();
+    }
+
+    delete(name, value) {
+        name = String(name);
+        this._pairs = this._pairs.filter(p =>
+            p[0] !== name || (value !== undefined && p[1] !== String(value)));
+        this._sync();
+    }
+
+    get(name) {
+        name = String(name);
+        const p = this._pairs.find(p => p[0] === name);
+        return p ? p[1] : null;
+    }
+
+    getAll(name) {
+        name = String(name);
+        return this._pairs.filter(p => p[0] === name).map(p => p[1]);
+    }
+
+    has(name, value) {
+        name = String(name);
+        return this._pairs.some(p =>
+            p[0] === name && (value === undefined || p[1] === String(value)));
+    }
+
+    set(name, value) {
+        name = String(name);
+        value = String(value);
+        const idx = this._pairs.findIndex(p => p[0] === name);
+        if (idx < 0) {
+            this._pairs.push([name, value]);
+        } else {
+            this._pairs[idx] = [name, value];
+            this._pairs = this._pairs.filter((p, i) => i <= idx || p[0] !== name);
+        }
+        this._sync();
+    }
+
+    sort() {
+        // Stable sort by name only, preserving relative value order per name.
+        this._pairs = this._pairs
+            .map((p, i) => [p, i])
+            .sort((a, b) => (a[0][0] < b[0][0] ? -1 : a[0][0] > b[0][0] ? 1 : a[1] - b[1]))
+            .map(x => x[0]);
+        this._sync();
+    }
+
+    forEach(fn, thisArg) {
+        for (const [k, v] of this._pairs.slice()) fn.call(thisArg, v, k, this);
+    }
+
+    get size() {
+        return this._pairs.length;
+    }
+
+    *keys() { for (const p of this._pairs.slice()) yield p[0]; }
+    *values() { for (const p of this._pairs.slice()) yield p[1]; }
+    *entries() { for (const p of this._pairs.slice()) yield [p[0], p[1]]; }
+    [Symbol.iterator]() { return this.entries(); }
+
+    toString() {
+        return this._pairs.map(p => formEncode(p[0]) + '=' + formEncode(p[1])).join('&');
+    }
+}
+
+const SPECIAL_PORTS = { http: '80', https: '443', ws: '80', wss: '443', ftp: '21' };
+
+// RFC 3986 §5.2.4 remove_dot_segments.
+function removeDotSegments(p) {
+    let input = p;
+    const output = [];
+    while (input.length) {
+        if (input.startsWith('../')) input = input.slice(3);
+        else if (input.startsWith('./')) input = input.slice(2);
+        else if (input.startsWith('/./')) input = '/' + input.slice(3);
+        else if (input === '/.') input = '/';
+        else if (input.startsWith('/../')) { input = '/' + input.slice(4); output.pop(); }
+        else if (input === '/..') { input = '/'; output.pop(); }
+        else if (input === '.' || input === '..') input = '';
+        else {
+            let i = input.indexOf('/', 1);
+            if (i < 0) { output.push(input); input = ''; }
+            else { output.push(input.slice(0, i)); input = input.slice(i); }
+        }
+    }
+    return output.join('');
+}
+
+function parseAuthority(url, authority) {
+    const atIdx = authority.lastIndexOf('@');
+    if (atIdx >= 0) {
+        const userinfo = authority.slice(0, atIdx);
+        const colonIdx = userinfo.indexOf(':');
+        if (colonIdx >= 0) {
+            url._username = userinfo.slice(0, colonIdx);
+            url._password = userinfo.slice(colonIdx + 1);
+        } else {
+            url._username = userinfo;
+        }
+        authority = authority.slice(atIdx + 1);
+    }
+    if (authority.startsWith('[')) {
+        const close = authority.indexOf(']');
+        if (close < 0) return false;
+        url._host = authority.slice(0, close + 1).toLowerCase();
+        const after = authority.slice(close + 1);
+        if (after) {
+            if (!after.startsWith(':')) return false;
+            url._port = after.slice(1);
+        }
+    } else {
+        const colonIdx = authority.lastIndexOf(':');
+        if (colonIdx >= 0) {
+            url._host = authority.slice(0, colonIdx).toLowerCase();
+            url._port = authority.slice(colonIdx + 1);
+        } else {
+            url._host = authority.toLowerCase();
+        }
+    }
+    if (url._port) {
+        if (!/^\d+$/.test(url._port) || Number(url._port) > 65535) return false;
+        if (SPECIAL_PORTS[url._scheme] === url._port) url._port = '';
+    }
+    return true;
+}
+
+class URL {
+    constructor(input, base) {
+        input = String(input).trim();
+        this._scheme = '';
+        this._username = '';
+        this._password = '';
+        this._host = '';
+        this._port = '';
+        this._path = '';
+        this._query = null;
+        this._fragment = null;
+        this._hasAuthority = false;
+
+        if (!this._parseAbsolute(input)) {
+            if (base === undefined) {
+                throw new TypeError(`Invalid URL: ${input}`);
+            }
+            const b = base instanceof URL ? base : new URL(String(base));
+            this._resolveRelative(input, b);
+        }
+        this._params = null;
+    }
+
+    _parseAbsolute(input) {
+        const m = /^([a-zA-Z][a-zA-Z0-9+.\-]*):([\s\S]*)$/.exec(input);
+        if (!m) return false;
+        this._scheme = m[1].toLowerCase();
+        let rest = m[2];
+
+        const hashIdx = rest.indexOf('#');
+        if (hashIdx >= 0) { this._fragment = rest.slice(hashIdx + 1); rest = rest.slice(0, hashIdx); }
+        const qIdx = rest.indexOf('?');
+        if (qIdx >= 0) { this._query = rest.slice(qIdx + 1); rest = rest.slice(0, qIdx); }
+
+        const special = SPECIAL_PORTS[this._scheme] !== undefined || this._scheme === 'file';
+        if (rest.startsWith('//')) {
+            rest = rest.slice(2);
+            const slashIdx = rest.indexOf('/');
+            const authority = slashIdx < 0 ? rest : rest.slice(0, slashIdx);
+            const path = slashIdx < 0 ? '' : rest.slice(slashIdx);
+            if (!parseAuthority(this, authority)) throw new TypeError(`Invalid URL: ${input}`);
+            if (special && this._scheme !== 'file' && !this._host) {
+                throw new TypeError(`Invalid URL: ${input}`);
+            }
+            this._hasAuthority = true;
+            this._path = removeDotSegments(path.replace(/ /g, '%20')) || '/';
+        } else {
+            this._path = special
+                ? removeDotSegments(rest.replace(/ /g, '%20'))
+                : rest.replace(/ /g, '%20');
+        }
+        return true;
+    }
+
+    _resolveRelative(input, base) {
+        this._scheme = base._scheme;
+        this._username = base._username;
+        this._password = base._password;
+        this._host = base._host;
+        this._port = base._port;
+        this._hasAuthority = base._hasAuthority;
+
+        let rest = input;
+        const hashIdx = rest.indexOf('#');
+        if (hashIdx >= 0) { this._fragment = rest.slice(hashIdx + 1); rest = rest.slice(0, hashIdx); }
+
+        if (!rest) {
+            this._path = base._path;
+            this._query = base._query;
+            return;
+        }
+
+        const qIdx = rest.indexOf('?');
+        if (qIdx >= 0) { this._query = rest.slice(qIdx + 1); rest = rest.slice(0, qIdx); }
+
+        if (!rest) {
+            this._path = base._path;
+            if (qIdx < 0) this._query = base._query;
+            return;
+        }
+
+        rest = rest.replace(/ /g, '%20');
+        if (rest.startsWith('//')) {
+            rest = rest.slice(2);
+            const slashIdx = rest.indexOf('/');
+            const authority = slashIdx < 0 ? rest : rest.slice(0, slashIdx);
+            const path = slashIdx < 0 ? '' : rest.slice(slashIdx);
+            this._username = '';
+            this._password = '';
+            this._host = '';
+            this._port = '';
+            if (!parseAuthority(this, authority)) throw new TypeError(`Invalid URL: ${input}`);
+            this._hasAuthority = true;
+            this._path = removeDotSegments(path) || '/';
+        } else if (rest.startsWith('/')) {
+            this._path = removeDotSegments(rest);
+        } else {
+            const basePath = base._path;
+            const lastSlash = basePath.lastIndexOf('/');
+            const merged = lastSlash < 0 ? rest : basePath.slice(0, lastSlash + 1) + rest;
+            this._path = removeDotSegments(merged);
+        }
+        if (this._hasAuthority && !this._path) this._path = '/';
+    }
+
+    _serialize() {
+        let s = this._scheme + ':';
+        if (this._hasAuthority) {
+            s += '//';
+            if (this._username || this._password) {
+                s += this._username;
+                if (this._password) s += ':' + this._password;
+                s += '@';
+            }
+            s += this._host;
+            if (this._port) s += ':' + this._port;
+        }
+        s += this._path;
+        if (this._query != null && this._query !== '') s += '?' + this._query;
+        if (this._fragment != null && this._fragment !== '') s += '#' + this._fragment;
+        return s;
+    }
+
+    get href() { return this._serialize(); }
+    set href(v) {
+        const u = new URL(String(v));
+        this._scheme = u._scheme;
+        this._username = u._username;
+        this._password = u._password;
+        this._host = u._host;
+        this._port = u._port;
+        this._path = u._path;
+        this._query = u._query;
+        this._fragment = u._fragment;
+        this._hasAuthority = u._hasAuthority;
+        this._refreshParams();
+    }
+
+    get protocol() { return this._scheme + ':'; }
+    set protocol(v) {
+        const m = /^([a-zA-Z][a-zA-Z0-9+.\-]*):?$/.exec(String(v));
+        if (m) this._scheme = m[1].toLowerCase();
+    }
+
+    get origin() {
+        if (SPECIAL_PORTS[this._scheme] !== undefined) {
+            return `${this._scheme}://${this._host}${this._port ? ':' + this._port : ''}`;
+        }
+        return 'null';
+    }
+
+    get username() { return this._username; }
+    set username(v) { if (this._hasAuthority) this._username = String(v); }
+
+    get password() { return this._password; }
+    set password(v) { if (this._hasAuthority) this._password = String(v); }
+
+    get host() { return this._port ? `${this._host}:${this._port}` : this._host; }
+    set host(v) {
+        v = String(v);
+        if (!this._hasAuthority || !v) return;
+        parseAuthority(this, v);
+    }
+
+    get hostname() { return this._host; }
+    set hostname(v) {
+        v = String(v).toLowerCase();
+        if (this._hasAuthority && v) this._host = v;
+    }
+
+    get port() { return this._port; }
+    set port(v) {
+        v = String(v);
+        if (v === '') { this._port = ''; return; }
+        if (/^\d+$/.test(v) && Number(v) <= 65535) {
+            this._port = SPECIAL_PORTS[this._scheme] === v ? '' : v;
+        }
+    }
+
+    get pathname() { return this._path; }
+    set pathname(v) {
+        v = String(v).replace(/ /g, '%20');
+        if (!v.startsWith('/') && this._hasAuthority) v = '/' + v;
+        this._path = removeDotSegments(v);
+    }
+
+    get search() { return this._query ? '?' + this._query : ''; }
+    set search(v) {
+        v = String(v);
+        if (v.startsWith('?')) v = v.slice(1);
+        this._query = v === '' ? null : v.replace(/ /g, '%20');
+        this._refreshParams();
+    }
+
+    get searchParams() {
+        if (!this._params) {
+            this._params = new URLSearchParams(this._query || '');
+            this._params._url = this;
+        }
+        return this._params;
+    }
+
+    _refreshParams() {
+        if (this._params) {
+            this._params._pairs = [];
+            if (this._query) this._params._parseQuery(this._query);
+        }
+    }
+
+    get hash() { return this._fragment ? '#' + this._fragment : ''; }
+    set hash(v) {
+        v = String(v);
+        if (v.startsWith('#')) v = v.slice(1);
+        this._fragment = v === '' ? null : v;
+    }
+
+    toString() { return this._serialize(); }
+    toJSON() { return this._serialize(); }
+
+    static canParse(input, base) {
+        try { new URL(input, base); return true; } catch (_) { return false; }
+    }
+}
+
+// ═══ crypto (getRandomValues / randomUUID) ═══════════════════════════════════
+// Entropy comes from os.getentropy — a wasmhub build patch that wires
+// quickjs-libc to wasi-libc getentropy(), i.e. the WASI random_get syscall.
+// Interpreter-only builds without the patch fall back to Math.random.
+
+function fillRandomBytes(bytes) {
+    if (typeof os.getentropy === 'function') {
+        bytes.set(new Uint8Array(os.getentropy(bytes.length)));
+        return;
+    }
+    for (let i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
+}
+
+function namedError(name, message) {
+    const e = new Error(message);
+    e.name = name;
+    return e;
+}
+
+const webCrypto = {
+    getRandomValues(view) {
+        if (!ArrayBuffer.isView(view)) {
+            throw new TypeError('crypto.getRandomValues: argument must be an integer TypedArray');
+        }
+        if (view instanceof Float32Array || view instanceof Float64Array) {
+            throw namedError('TypeMismatchError', 'crypto.getRandomValues: float arrays are not supported');
+        }
+        if (view.byteLength > 65536) {
+            throw namedError('QuotaExceededError', 'crypto.getRandomValues: byteLength must not exceed 65536');
+        }
+        fillRandomBytes(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+        return view;
+    },
+
+    randomUUID() {
+        const b = new Uint8Array(16);
+        fillRandomBytes(b);
+        b[6] = (b[6] & 0x0f) | 0x40; // version 4
+        b[8] = (b[8] & 0x3f) | 0x80; // variant 10
+        const h = Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+        return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+    },
+};
+
+// ═══ structuredClone ══════════════════════════════════════════════════════════
+
+function structuredCloneImpl(value, options) {
+    if (options && options.transfer && options.transfer.length) {
+        throw namedError('DataCloneError', 'structuredClone: transfer is not supported in this runtime');
+    }
+    const seen = new Map();
+
+    function clone(v) {
+        if (v === null || (typeof v !== 'object' && typeof v !== 'function' && typeof v !== 'symbol')) {
+            return v;
+        }
+        if (typeof v === 'function') {
+            throw namedError('DataCloneError', 'structuredClone: function could not be cloned');
+        }
+        if (typeof v === 'symbol') {
+            throw namedError('DataCloneError', 'structuredClone: symbol could not be cloned');
+        }
+        if (seen.has(v)) return seen.get(v);
+
+        if (v instanceof Date) { const c = new Date(v.getTime()); seen.set(v, c); return c; }
+        if (v instanceof RegExp) { const c = new RegExp(v.source, v.flags); seen.set(v, c); return c; }
+        if (v instanceof ArrayBuffer) { const c = v.slice(0); seen.set(v, c); return c; }
+        if (ArrayBuffer.isView(v)) {
+            const buf = clone(v.buffer);
+            const c = v instanceof DataView
+                ? new DataView(buf, v.byteOffset, v.byteLength)
+                : new v.constructor(buf, v.byteOffset, v.length);
+            seen.set(v, c);
+            return c;
+        }
+        if (v instanceof Map) {
+            const c = new Map();
+            seen.set(v, c);
+            for (const [k, val] of v) c.set(clone(k), clone(val));
+            return c;
+        }
+        if (v instanceof Set) {
+            const c = new Set();
+            seen.set(v, c);
+            for (const val of v) c.add(clone(val));
+            return c;
+        }
+        if (v instanceof Error) {
+            const Ctor = typeof v.constructor === 'function' ? v.constructor : Error;
+            let c;
+            try { c = new Ctor(v.message); } catch (_) { c = new Error(v.message); }
+            c.name = v.name;
+            if (typeof v.stack === 'string') c.stack = v.stack;
+            seen.set(v, c);
+            return c;
+        }
+        if (v instanceof Promise) {
+            throw namedError('DataCloneError', 'structuredClone: Promise could not be cloned');
+        }
+        if (v instanceof Boolean || v instanceof Number || v instanceof String) {
+            const c = Object(v.valueOf());
+            seen.set(v, c);
+            return c;
+        }
+        if (Array.isArray(v)) {
+            const c = [];
+            seen.set(v, c);
+            for (let i = 0; i < v.length; i++) {
+                if (i in v) c[i] = clone(v[i]);
+            }
+            return c;
+        }
+        // Everything else clones as a plain object of its own enumerable
+        // string-keyed properties (prototypes are not preserved, per spec).
+        const c = {};
+        seen.set(v, c);
+        for (const k of Object.keys(v)) c[k] = clone(v[k]);
+        return c;
+    }
+
+    return clone(value);
+}
+
+// ═══ fetch (unsupported — clear error instead of ReferenceError) ══════════════
+
+function fetchUnsupported() {
+    const e = new TypeError(
+        'fetch: network access is not supported in this WASI runtime yet — ' +
+        'the sandbox has no socket syscalls. HTTP requests from sandboxed code ' +
+        'arrive with the wasmnet networking milestone.'
+    );
+    e.code = 'ERR_NETWORK_UNSUPPORTED';
+    return Promise.reject(e);
+}
+
+function installWebGlobals() {
+    globalThis.URL = URL;
+    globalThis.URLSearchParams = URLSearchParams;
+    globalThis.crypto = webCrypto;
+    globalThis.structuredClone = structuredCloneImpl;
+    globalThis.fetch = fetchUnsupported;
+}
+
 // ═══ Built-in module registry ════════════════════════════════════════════════
 
 const builtins = {
@@ -1639,6 +2192,7 @@ function setupGlobals(entryPath, extraArgs) {
     globalThis.atob = bufferModule.atob;
     globalThis.btoa = bufferModule.btoa;
     installTimerGlobals();
+    installWebGlobals();
 
     const fromDir = entryPath ? path.dirname(entryPath) : currentCwd();
     if (entryPath) {
@@ -1671,7 +2225,7 @@ function printVersion() {
     std.out.puts(`Target: WASI Preview 1\n`);
     std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, timers, async, buffer\n`);
     std.out.puts(`Built-ins: path, fs, os, buffer, events, util, assert, stream (and node:* aliases)\n`);
-    std.out.puts(`Globals: Buffer, TextEncoder, TextDecoder, atob, btoa\n`);
+    std.out.puts(`Globals: Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone\n`);
     std.out.flush();
 }
 

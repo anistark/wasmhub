@@ -193,4 +193,4 @@ cp "${OUTPUT_PATH}" "${RUNTIMES_DIR}/"
     --language nodejs \
     --version "${NODE_VERSION}" \
     --file "${RUNTIMES_DIR}/${OUTPUT_NAME}" \
-    --features "eval,esm,require,commonjs,filesystem,stdio,env,path,fs,os,process,timers,async,buffer,events,util,assert,stream"
+    --features "eval,esm,require,commonjs,filesystem,stdio,env,path,fs,os,process,timers,async,buffer,events,util,assert,stream,url,crypto,structured-clone"

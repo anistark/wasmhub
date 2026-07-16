@@ -36,6 +36,7 @@ wasmhub cache clear-all [--yes]           # Clear all cache
 | PHP      | `php` |
 | Go       | `go`, `golang` |
 | Rust     | `rust`, `rs` |
+| swc      | `swc` |
 
 ## Examples
 

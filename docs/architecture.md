@@ -79,4 +79,4 @@ The cache is content-addressed by language + version. Integrity checks happen on
 
 ## Why WASI Preview 1?
 
-Both shipped runtimes target `wasm32-wasip1`. WASI Preview 2 (component model) is still stabilizing across runtimes — `wasip1` gives the broadest compatibility today. We'll add `wasip2` outputs once tooling matures across the runtime ecosystem.
+All shipped runtimes target `wasm32-wasip1`. WASI Preview 2 (component model) is still stabilizing across runtimes — `wasip1` gives the broadest compatibility today. We'll add `wasip2` outputs once tooling matures across the runtime ecosystem.

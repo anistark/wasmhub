@@ -29,7 +29,14 @@
         "stream",
         "url",
         "crypto",
-        "structured-clone"
+        "structured-clone",
+        "querystring",
+        "string-decoder",
+        "fs-promises",
+        "timers-promises",
+        "zlib-stub",
+        "worker-threads-stub",
+        "child-process-stub"
       ]
     }
   }

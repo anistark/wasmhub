@@ -38,6 +38,11 @@ build-release:
 test:
     cargo test --all-features
 
+# Test the nodejs runtime's built-in modules under plain node (no wasm build
+# needed; expected values are cross-checked against node's own implementations)
+test-nodejs-builtins:
+    node --test "tests/runtimes/nodejs/*.test.mjs"
+
 # Run tests with output
 test-verbose:
     cargo test --all-features -- --nocapture
@@ -206,7 +211,7 @@ release-github version:
     echo "Check build progress at: https://github.com/anistark/wasmhub/actions"
 
 # Run CI checks locally (format, lint, library check, test)
-ci: format-check lint check-lib test
+ci: format-check lint check-lib test test-nodejs-builtins
 
 # Verify library compiles with no features (no CLI deps leaking)
 check-lib:

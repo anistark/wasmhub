@@ -1858,26 +1858,633 @@ function installWebGlobals() {
     globalThis.fetch = fetchUnsupported;
 }
 
+// ═══ querystring ══════════════════════════════════════════════════════════════
+
+function qsStringifyPrimitive(v) {
+    if (typeof v === 'string') return v;
+    if (typeof v === 'number' && isFinite(v)) return String(v);
+    if (typeof v === 'boolean') return v ? 'true' : 'false';
+    if (typeof v === 'bigint') return String(v);
+    return '';
+}
+
+// encodeURIComponent leaves !'()* alone; node's querystring escapes them.
+function qsEscape(str) {
+    return encodeURIComponent(String(str)).replace(
+        /[!'()*]/g,
+        c => '%' + c.charCodeAt(0).toString(16).toUpperCase()
+    );
+}
+
+function qsUnescape(str) {
+    // node falls back to the raw text rather than throwing.
+    try { return decodeURIComponent(String(str).replace(/\+/g, ' ')); }
+    catch (e) { return String(str).replace(/\+/g, ' '); }
+}
+
+const querystring = {
+    escape: qsEscape,
+    unescape: qsUnescape,
+
+    stringify(obj, sep, eq) {
+        sep = sep || '&';
+        eq = eq || '=';
+        if (!obj || typeof obj !== 'object') return '';
+        const parts = [];
+        for (const key of Object.keys(obj)) {
+            const k = qsEscape(key);
+            const v = obj[key];
+            if (Array.isArray(v)) {
+                for (const item of v) parts.push(k + eq + qsEscape(qsStringifyPrimitive(item)));
+            } else {
+                parts.push(k + eq + qsEscape(qsStringifyPrimitive(v)));
+            }
+        }
+        return parts.join(sep);
+    },
+
+    parse(str, sep, eq) {
+        sep = sep || '&';
+        eq = eq || '=';
+        // Null-prototype, like node: "__proto__" must not poison the result.
+        const out = Object.create(null);
+        if (typeof str !== 'string' || str.length === 0) return out;
+        for (const pair of str.split(sep)) {
+            if (!pair) continue;
+            const idx = pair.indexOf(eq);
+            const k = qsUnescape(idx === -1 ? pair : pair.slice(0, idx));
+            const v = idx === -1 ? '' : qsUnescape(pair.slice(idx + eq.length));
+            if (out[k] === undefined) out[k] = v;
+            else if (Array.isArray(out[k])) out[k].push(v);
+            else out[k] = [out[k], v];
+        }
+        return out;
+    },
+};
+querystring.encode = querystring.stringify;
+querystring.decode = querystring.parse;
+
+// ═══ string_decoder ═══════════════════════════════════════════════════════════
+// Decodes byte chunks without splitting a character across a chunk boundary:
+// incomplete trailing bytes are held back until the rest arrives.
+
+/// Longest prefix of `bytes` ending on a complete UTF-8 character.
+function utf8CompleteLength(bytes) {
+    let i = bytes.length;
+    let trailing = 0;
+    while (i > 0 && trailing < 4) {
+        i--;
+        trailing++;
+        const b = bytes[i];
+        if ((b & 0xC0) === 0x80) continue; // continuation byte, keep scanning back
+        let need = 1;
+        if ((b & 0xE0) === 0xC0) need = 2;
+        else if ((b & 0xF0) === 0xE0) need = 3;
+        else if ((b & 0xF8) === 0xF0) need = 4;
+        return trailing >= need ? bytes.length : i;
+    }
+    return bytes.length;
+}
+
+class StringDecoder {
+    constructor(encoding) {
+        this.encoding = String(encoding || 'utf8').toLowerCase().replace(/[-_]/g, '');
+        if (this.encoding === 'utf8' || this.encoding === 'utf-8') this.encoding = 'utf8';
+        this._held = new Uint8Array(0);
+    }
+
+    write(chunk) {
+        if (typeof chunk === 'string') return chunk;
+        let bytes = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk);
+        if (this._held.length > 0) {
+            const joined = new Uint8Array(this._held.length + bytes.length);
+            joined.set(this._held, 0);
+            joined.set(bytes, this._held.length);
+            bytes = joined;
+            this._held = new Uint8Array(0);
+        }
+        let take = bytes.length;
+        if (this.encoding === 'utf8') {
+            take = utf8CompleteLength(bytes);
+        } else if (this.encoding === 'base64') {
+            // A partial group would encode padding the next chunk invalidates.
+            take = bytes.length - (bytes.length % 3);
+        } else if (this.encoding === 'utf16le' || this.encoding === 'ucs2') {
+            take = bytes.length - (bytes.length % 2);
+        }
+        if (take < bytes.length) this._held = bytes.slice(take);
+        return Buffer.from(bytes.slice(0, take)).toString(this.encoding);
+    }
+
+    end(chunk) {
+        let out = chunk !== undefined && chunk !== null ? this.write(chunk) : '';
+        if (this._held.length > 0) {
+            // Emit the incomplete tail rather than dropping input, like node.
+            out += Buffer.from(this._held).toString(this.encoding);
+            this._held = new Uint8Array(0);
+        }
+        return out;
+    }
+}
+
+const stringDecoderModule = { StringDecoder };
+
+// ═══ url module ═══════════════════════════════════════════════════════════════
+// Exposes the WHATWG globals under the module name, plus the legacy API.
+
+function fileURLToPath(input) {
+    const u = typeof input === 'string' ? new URL(input) : input;
+    if (u.protocol !== 'file:') {
+        const e = new TypeError('The URL must be of scheme file');
+        e.code = 'ERR_INVALID_URL_SCHEME';
+        throw e;
+    }
+    return decodeURIComponent(u.pathname);
+}
+
+function pathToFileURL(p) {
+    const encoded = String(p).split('/').map(encodeURIComponent).join('/');
+    return new URL('file://' + (encoded.startsWith('/') ? '' : '/') + encoded);
+}
+
+const urlModule = {
+    URL,
+    URLSearchParams,
+    fileURLToPath,
+    pathToFileURL,
+
+    /// Legacy flat shape, built from the WHATWG parser so the two agree.
+    parse(input, parseQueryString) {
+        let u;
+        try {
+            u = new URL(input);
+        } catch (e) {
+            // Legacy parse accepts relative URLs; the WHATWG one does not.
+            u = new URL(input, 'http://localhost');
+            u = { protocol: null, host: null, hostname: null, port: '', username: '', password: '',
+                  pathname: u.pathname, search: u.search, hash: u.hash };
+        }
+        const search = u.search || null;
+        const query = parseQueryString
+            ? querystring.parse((search || '').replace(/^\?/, ''))
+            : (search ? search.replace(/^\?/, '') : null);
+        const auth = u.username ? (u.password ? `${u.username}:${u.password}` : u.username) : null;
+        return {
+            protocol: u.protocol || null,
+            slashes: u.protocol ? true : null,
+            auth,
+            host: u.host || null,
+            port: u.port || null,
+            hostname: u.hostname || null,
+            hash: u.hash || null,
+            search,
+            query,
+            pathname: u.pathname || null,
+            path: (u.pathname || '') + (search || '') || null,
+            href: u.href !== undefined ? u.href : null,
+        };
+    },
+
+    format(input) {
+        if (typeof input === 'string') return input;
+        if (input instanceof URL) return input.href;
+        const protocol = input.protocol ? (input.protocol.endsWith(':') ? input.protocol : input.protocol + ':') : '';
+        const host = input.host || (input.hostname ? input.hostname + (input.port ? ':' + input.port : '') : '');
+        const auth = input.auth ? input.auth + '@' : '';
+        const pathname = input.pathname || '';
+        let search = input.search || '';
+        if (!search && input.query) {
+            search = typeof input.query === 'string' ? '?' + input.query : '?' + querystring.stringify(input.query);
+        }
+        const hash = input.hash ? (input.hash.startsWith('#') ? input.hash : '#' + input.hash) : '';
+        const slashes = protocol && host ? '//' : '';
+        return protocol + slashes + auth + host + pathname + search + hash;
+    },
+
+    resolve(from, to) {
+        return new URL(to, from).href;
+    },
+
+    // No IDNA table here; nothing reachable from the sandbox needs one.
+    domainToASCII(d) { return String(d).toLowerCase(); },
+    domainToUnicode(d) { return String(d); },
+};
+
+// ═══ Hashes (sha256 / sha1 / md5) ═════════════════════════════════════════════
+// Self-contained: there is no libcrypto, and createHash is too common to omit.
+
+const SHA256_K = new Uint32Array([
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+]);
+
+/// The 0x80 marker and 64-bit length shared by all three hashes here.
+/// `bigEndian` is false only for md5.
+function padMessage(bytes, bigEndian) {
+    const bitLen = bytes.length * 8;
+    const padded = new Uint8Array(((bytes.length + 9 + 63) >> 6) << 6);
+    padded.set(bytes, 0);
+    padded[bytes.length] = 0x80;
+    const view = new DataView(padded.buffer);
+    if (bigEndian) view.setUint32(padded.length - 4, bitLen >>> 0, false);
+    else view.setUint32(padded.length - 8, bitLen >>> 0, true);
+    return padded;
+}
+
+function sha256(bytes) {
+    const h = new Uint32Array([
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    ]);
+    const padded = padMessage(bytes, true);
+    const view = new DataView(padded.buffer);
+    const w = new Uint32Array(64);
+    const rotr = (x, n) => (x >>> n) | (x << (32 - n));
+
+    for (let off = 0; off < padded.length; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4, false);
+        for (let i = 16; i < 64; i++) {
+            const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
+            const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
+            w[i] = (w[i - 16] + s0 + w[i - 7] + s1) >>> 0;
+        }
+        let [a, b, c, d, e, f, g, hh] = h;
+        for (let i = 0; i < 64; i++) {
+            const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            const ch = (e & f) ^ (~e & g);
+            const t1 = (hh + S1 + ch + SHA256_K[i] + w[i]) >>> 0;
+            const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            const maj = (a & b) ^ (a & c) ^ (b & c);
+            const t2 = (S0 + maj) >>> 0;
+            hh = g; g = f; f = e;
+            e = (d + t1) >>> 0;
+            d = c; c = b; b = a;
+            a = (t1 + t2) >>> 0;
+        }
+        h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0; h[3] = (h[3] + d) >>> 0;
+        h[4] = (h[4] + e) >>> 0; h[5] = (h[5] + f) >>> 0; h[6] = (h[6] + g) >>> 0; h[7] = (h[7] + hh) >>> 0;
+    }
+    const out = new Uint8Array(32);
+    const ov = new DataView(out.buffer);
+    for (let i = 0; i < 8; i++) ov.setUint32(i * 4, h[i], false);
+    return out;
+}
+
+function sha1(bytes) {
+    const h = new Uint32Array([0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0]);
+    const padded = padMessage(bytes, true);
+    const view = new DataView(padded.buffer);
+    const w = new Uint32Array(80);
+    const rotl = (x, n) => (x << n) | (x >>> (32 - n));
+
+    for (let off = 0; off < padded.length; off += 64) {
+        for (let i = 0; i < 16; i++) w[i] = view.getUint32(off + i * 4, false);
+        for (let i = 16; i < 80; i++) w[i] = rotl(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+        let [a, b, c, d, e] = h;
+        for (let i = 0; i < 80; i++) {
+            let f, k;
+            if (i < 20) { f = (b & c) | (~b & d); k = 0x5a827999; }
+            else if (i < 40) { f = b ^ c ^ d; k = 0x6ed9eba1; }
+            else if (i < 60) { f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc; }
+            else { f = b ^ c ^ d; k = 0xca62c1d6; }
+            const t = (rotl(a, 5) + f + e + k + w[i]) >>> 0;
+            e = d; d = c; c = rotl(b, 30) >>> 0; b = a; a = t;
+        }
+        h[0] = (h[0] + a) >>> 0; h[1] = (h[1] + b) >>> 0; h[2] = (h[2] + c) >>> 0;
+        h[3] = (h[3] + d) >>> 0; h[4] = (h[4] + e) >>> 0;
+    }
+    const out = new Uint8Array(20);
+    const ov = new DataView(out.buffer);
+    for (let i = 0; i < 5; i++) ov.setUint32(i * 4, h[i], false);
+    return out;
+}
+
+const MD5_S = [
+    7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+    5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+    4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+    6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+];
+const MD5_K = new Uint32Array(
+    Array.from({ length: 64 }, (_, i) => Math.floor(Math.abs(Math.sin(i + 1)) * 4294967296))
+);
+
+function md5(bytes) {
+    let [a0, b0, c0, d0] = [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476];
+    const padded = padMessage(bytes, false);
+    const view = new DataView(padded.buffer);
+    const m = new Uint32Array(16);
+    const rotl = (x, n) => (x << n) | (x >>> (32 - n));
+
+    for (let off = 0; off < padded.length; off += 64) {
+        for (let i = 0; i < 16; i++) m[i] = view.getUint32(off + i * 4, true);
+        let [a, b, c, d] = [a0, b0, c0, d0];
+        for (let i = 0; i < 64; i++) {
+            let f, g;
+            if (i < 16) { f = (b & c) | (~b & d); g = i; }
+            else if (i < 32) { f = (d & b) | (~d & c); g = (5 * i + 1) % 16; }
+            else if (i < 48) { f = b ^ c ^ d; g = (3 * i + 5) % 16; }
+            else { f = c ^ (b | ~d); g = (7 * i) % 16; }
+            f = (f + a + MD5_K[i] + m[g]) >>> 0;
+            a = d; d = c; c = b;
+            b = (b + rotl(f, MD5_S[i])) >>> 0;
+        }
+        a0 = (a0 + a) >>> 0; b0 = (b0 + b) >>> 0; c0 = (c0 + c) >>> 0; d0 = (d0 + d) >>> 0;
+    }
+    const out = new Uint8Array(16);
+    const ov = new DataView(out.buffer);
+    ov.setUint32(0, a0, true); ov.setUint32(4, b0, true);
+    ov.setUint32(8, c0, true); ov.setUint32(12, d0, true);
+    return out;
+}
+
+const HASH_ALGORITHMS = {
+    sha256: { fn: sha256, blockSize: 64 },
+    sha1: { fn: sha1, blockSize: 64 },
+    md5: { fn: md5, blockSize: 64 },
+};
+
+// ═══ crypto module ════════════════════════════════════════════════════════════
+
+function toBytes(data, encoding) {
+    if (typeof data === 'string') return new Uint8Array(Buffer.from(data, encoding || 'utf8'));
+    if (data instanceof Uint8Array) return data;
+    if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    if (data instanceof ArrayBuffer) return new Uint8Array(data);
+    throw new TypeError('data must be a string, Buffer, or TypedArray');
+}
+
+function digestTo(bytes, encoding) {
+    const buf = Buffer.from(bytes);
+    return encoding ? buf.toString(encoding) : buf;
+}
+
+function resolveAlgorithm(algorithm) {
+    const key = String(algorithm).toLowerCase().replace(/-/g, '');
+    const spec = HASH_ALGORITHMS[key];
+    if (!spec) {
+        const e = new Error(
+            `Digest method '${algorithm}' is not supported; available: ${Object.keys(HASH_ALGORITHMS).join(', ')}`
+        );
+        e.code = 'ERR_CRYPTO_INVALID_DIGEST';
+        throw e;
+    }
+    return spec;
+}
+
+class Hash {
+    constructor(algorithm) {
+        this._spec = resolveAlgorithm(algorithm);
+        this._chunks = [];
+    }
+    update(data, encoding) {
+        this._chunks.push(toBytes(data, encoding));
+        return this;
+    }
+    digest(encoding) {
+        let total = 0;
+        for (const c of this._chunks) total += c.length;
+        const all = new Uint8Array(total);
+        let at = 0;
+        for (const c of this._chunks) { all.set(c, at); at += c.length; }
+        return digestTo(this._spec.fn(all), encoding);
+    }
+}
+
+class Hmac {
+    constructor(algorithm, key) {
+        this._spec = resolveAlgorithm(algorithm);
+        const block = this._spec.blockSize;
+        let k = toBytes(key);
+        if (k.length > block) k = this._spec.fn(k);
+        const padded = new Uint8Array(block);
+        padded.set(k, 0);
+        this._outer = new Uint8Array(block);
+        this._inner = new Uint8Array(block);
+        for (let i = 0; i < block; i++) {
+            this._outer[i] = padded[i] ^ 0x5c;
+            this._inner[i] = padded[i] ^ 0x36;
+        }
+        this._chunks = [this._inner];
+    }
+    update(data, encoding) {
+        this._chunks.push(toBytes(data, encoding));
+        return this;
+    }
+    digest(encoding) {
+        let total = 0;
+        for (const c of this._chunks) total += c.length;
+        const all = new Uint8Array(total);
+        let at = 0;
+        for (const c of this._chunks) { all.set(c, at); at += c.length; }
+        const innerDigest = this._spec.fn(all);
+        const outer = new Uint8Array(this._outer.length + innerDigest.length);
+        outer.set(this._outer, 0);
+        outer.set(innerDigest, this._outer.length);
+        return digestTo(this._spec.fn(outer), encoding);
+    }
+}
+
+const nodeCrypto = {
+    webcrypto: webCrypto,
+    getRandomValues: view => webCrypto.getRandomValues(view),
+    randomUUID: () => webCrypto.randomUUID(),
+
+    randomBytes(size, callback) {
+        const b = new Uint8Array(size);
+        fillRandomBytes(b);
+        const buf = Buffer.from(b);
+        if (typeof callback === 'function') {
+            // node defers the callback; match its ordering.
+            queueMicrotask(() => callback(null, buf));
+            return undefined;
+        }
+        return buf;
+    },
+
+    randomFillSync(view) {
+        return webCrypto.getRandomValues(view);
+    },
+
+    randomInt(min, max) {
+        if (max === undefined) { max = min; min = 0; }
+        const range = max - min;
+        if (range <= 0) throw new RangeError('max must be greater than min');
+        // Rejection sampling: a plain modulus would skew toward the low end.
+        const bytes = new Uint8Array(6);
+        const limit = Math.floor(281474976710655 / range) * range;
+        let value;
+        do {
+            fillRandomBytes(bytes);
+            value = 0;
+            for (let i = 0; i < 6; i++) value = value * 256 + bytes[i];
+        } while (value >= limit);
+        return min + (value % range);
+    },
+
+    createHash(algorithm) { return new Hash(algorithm); },
+    createHmac(algorithm, key) { return new Hmac(algorithm, key); },
+
+    timingSafeEqual(a, b) {
+        const x = toBytes(a);
+        const y = toBytes(b);
+        if (x.length !== y.length) throw new RangeError('Input buffers must have the same byte length');
+        let diff = 0;
+        for (let i = 0; i < x.length; i++) diff |= x[i] ^ y[i];
+        return diff === 0;
+    },
+
+    getHashes() { return Object.keys(HASH_ALGORITHMS); },
+
+    Hash,
+    Hmac,
+};
+
+// ═══ fs/promises ══════════════════════════════════════════════════════════════
+// Wrappers over the sync calls: WASI Preview 1 has no async I/O, but the
+// promise API is what modern code reaches for.
+
+function asPromise(fn) {
+    return function (...args) {
+        try { return Promise.resolve(fn(...args)); }
+        catch (e) { return Promise.reject(e); }
+    };
+}
+
+const fsPromises = {
+    readFile: asPromise((p, o) => fs.readFileSync(p, o)),
+    writeFile: asPromise((p, d, o) => fs.writeFileSync(p, d, o)),
+    appendFile: asPromise((p, d, o) => fs.appendFileSync(p, d, o)),
+    mkdir: asPromise((p, o) => fs.mkdirSync(p, o)),
+    readdir: asPromise((p, o) => fs.readdirSync(p, o)),
+    stat: asPromise(p => fs.statSync(p)),
+    lstat: asPromise(p => fs.statSync(p)),
+    unlink: asPromise(p => fs.unlinkSync(p)),
+    rm: asPromise((p, o) => fs.rmSync(p, o)),
+    rmdir: asPromise(p => fs.rmSync(p)),
+    rename: asPromise((a, b) => fs.renameSync(a, b)),
+    realpath: asPromise(p => fs.realpathSync(p)),
+    copyFile: asPromise((a, b) => fs.writeFileSync(b, fs.readFileSync(a))),
+
+    access(p) {
+        return fs.existsSync(p)
+            ? Promise.resolve()
+            : Promise.reject(fsError('ENOENT', 'no such file or directory', p));
+    },
+};
+
+fs.promises = fsPromises;
+
+// ═══ timers / timers/promises ═════════════════════════════════════════════════
+
+const timersModule = {
+    setTimeout: (...a) => setTimeout(...a),
+    clearTimeout: (...a) => clearTimeout(...a),
+    setInterval: (...a) => setInterval(...a),
+    clearInterval: (...a) => clearInterval(...a),
+    setImmediate: (...a) => setImmediate(...a),
+    clearImmediate: (...a) => clearImmediate(...a),
+};
+
+const timersPromises = {
+    setTimeout(ms, value) {
+        return new Promise(resolve => setTimeout(() => resolve(value), ms));
+    },
+    setImmediate(value) {
+        return new Promise(resolve => setImmediate(() => resolve(value)));
+    },
+    async *setInterval(ms, value) {
+        // Yields forever; breaking out of the for-await clears the timer.
+        while (true) {
+            await new Promise(resolve => setTimeout(resolve, ms));
+            yield value;
+        }
+    },
+    scheduler: {
+        wait(ms) { return new Promise(resolve => setTimeout(resolve, ms)); },
+    },
+};
+
+// ═══ Modules the sandbox cannot provide ═══════════════════════════════════════
+// Present but throwing, deliberately: absent, they fail at require() time with
+// "Cannot find module", which reads as a broken runtime. This way a package
+// that merely imports one keeps working.
+
+function unsupportedModule(moduleName, reason, members) {
+    const mod = {};
+    for (const name of members) {
+        mod[name] = function () {
+            const e = new Error(`${moduleName}.${name}() is not supported in this sandbox: ${reason}`);
+            e.code = 'ERR_NOT_SUPPORTED';
+            throw e;
+        };
+    }
+    return mod;
+}
+
+const zlib = unsupportedModule(
+    'zlib',
+    'no compression library is linked into the runtime',
+    ['deflate', 'deflateSync', 'inflate', 'inflateSync', 'gzip', 'gzipSync', 'gunzip', 'gunzipSync',
+     'brotliCompress', 'brotliCompressSync', 'brotliDecompress', 'brotliDecompressSync',
+     'createGzip', 'createGunzip', 'createDeflate', 'createInflate']
+);
+
+const childProcess = unsupportedModule(
+    'child_process',
+    'the sandbox has no process table and no executables to run',
+    ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']
+);
+
+class Worker {
+    constructor() {
+        const e = new Error('worker_threads.Worker is not supported in this sandbox: the runtime is single-threaded');
+        e.code = 'ERR_NOT_SUPPORTED';
+        throw e;
+    }
+}
+
+const workerThreads = {
+    isMainThread: true,
+    threadId: 0,
+    workerData: null,
+    parentPort: null,
+    Worker,
+};
+
 // ═══ Built-in module registry ════════════════════════════════════════════════
 
 const builtins = {
     'path': path,
     'fs': fs,
+    'fs/promises': fsPromises,
     'os': nodeOs,
     'buffer': bufferModule,
     'events': eventsModule,
     'util': util,
     'assert': assertModule,
     'stream': streamModule,
-    'node:path': path,
-    'node:fs': fs,
-    'node:os': nodeOs,
-    'node:buffer': bufferModule,
-    'node:events': eventsModule,
-    'node:util': util,
-    'node:assert': assertModule,
-    'node:stream': streamModule,
+    'crypto': nodeCrypto,
+    'url': urlModule,
+    'querystring': querystring,
+    'string_decoder': stringDecoderModule,
+    'timers': timersModule,
+    'timers/promises': timersPromises,
+    'zlib': zlib,
+    'worker_threads': workerThreads,
+    'child_process': childProcess,
 };
+
+// Derived rather than listed twice, so the two cannot drift.
+for (const name of Object.keys(builtins)) {
+    builtins[`node:${name}`] = builtins[name];
+}
 
 // ═══ Module loader (CommonJS require) ════════════════════════════════════════
 
@@ -2224,7 +2831,8 @@ function printVersion() {
     std.out.puts(`Engine: ${ENGINE}\n`);
     std.out.puts(`Target: WASI Preview 1\n`);
     std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, timers, async, buffer\n`);
-    std.out.puts(`Built-ins: path, fs, os, buffer, events, util, assert, stream (and node:* aliases)\n`);
+    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises (and node:* aliases)\n`);
+    std.out.puts(`Stubbed: zlib, worker_threads, child_process (present, throw a clear error when used)\n`);
     std.out.puts(`Globals: Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone\n`);
     std.out.flush();
 }

@@ -15,6 +15,7 @@ fixtures/
   base.js             # events (EventEmitter) + util + assert
   stream.js           # stream — Readable.from/Transform/Writable/PassThrough/pipe
   webglobals.js       # URL/URLSearchParams, structuredClone, crypto, fetch stub
+  builtins.js         # fs/promises, timers/promises, crypto entropy, module stubs
   node_modules/
     greet/
       package.json    # main: src/greet.js
@@ -168,4 +169,41 @@ identical under real Node — diff the two:
 node tests/runtimes/nodejs/fixtures/webglobals.js > expected.txt
 wasmrun exec --dir tests/runtimes/nodejs/fixtures \
   runtimes/nodejs/nodejs-20.wasm -- run tests/runtimes/nodejs/fixtures/webglobals.js | diff expected.txt -
+```
+
+---
+
+## Testing built-ins without a wasm build
+
+Most of the built-in modules added in v0.4.0 are pure computation, so they can
+be tested under plain node instead of a built runtime:
+
+```sh
+just test-nodejs-builtins        # node --test "tests/runtimes/nodejs/*.test.mjs"
+```
+
+`harness.mjs` loads `runtimes/nodejs/main.js` with the QuickJS `std`/`os`
+imports shimmed out, and `builtins.test.mjs` checks the results against node's
+own implementations, so a divergence shows up as a test failure rather than as
+a surprise inside somebody's sandbox. This runs in `just ci`.
+
+What the harness cannot cover is anything touching the filesystem or the event
+loop. That is what `fixtures/builtins.js` is for, and it needs a built runtime:
+
+```sh
+wasmrun exec \
+  --dir tests/runtimes/nodejs/fixtures \
+  runtimes/nodejs/nodejs-20.wasm -- \
+  run tests/runtimes/nodejs/fixtures/builtins.js
+```
+
+Expected output:
+
+```
+fs/promises=ok
+fs.promises=ok
+timers/promises=ok
+crypto=ok
+stubs=ok
+builtins=pass
 ```

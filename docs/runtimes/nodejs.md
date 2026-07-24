@@ -38,11 +38,17 @@ eleventyNavigation:
 - ES2020: async/await, optional chaining, nullish coalescing, BigInt
 - **CommonJS `require()`** with relative paths (`./foo`), absolute paths (`/abs`), JSON imports, `package.json` `main` resolution, and `node_modules` lookup walking up the directory tree
 - `module.exports`, `exports`, `__filename`, `__dirname`, `require.cache`, `require.resolve`, `require.main`
-- **Built-in modules:** `path`, `fs`, `os`, `buffer`, `events`, `util`, `assert`, `stream` (also under the `node:` prefix)
+- **Built-in modules:** `path`, `fs`, `fs/promises`, `os`, `buffer`, `events`, `util`, `assert`, `stream`, `crypto`, `url`, `querystring`, `string_decoder`, `timers`, `timers/promises` (all also under the `node:` prefix)
 - **`events`** — full `EventEmitter` (`on`/`once`/`off`/`prependListener`/`removeAllListeners`/`emit`/`listeners`/`listenerCount`/`eventNames`, the `error` special-case, `newListener`/`removeListener` meta-events, static `EventEmitter.once`)
 - **`util`** — `format`, `inspect`, `inherits`, `promisify`, `callbackify`, `deprecate`, `debuglog`, `isDeepStrictEqual`, `types.*`, `TextEncoder`/`TextDecoder`
 - **`assert`** — `ok`/`equal`/`strictEqual`/`deepStrictEqual`/`throws`/`rejects`/`ifError`/`match`/… plus `assert.strict` and `AssertionError`
 - **`stream`** — `Readable` (incl. `Readable.from`), `Writable`, `Duplex`, `Transform`, `PassThrough`, `pipeline`, `finished`, `.pipe()`
+- **`crypto`** — `createHash` and `createHmac` (`sha256`, `sha1`, `md5`), `randomBytes`, `randomInt`, `randomUUID`, `randomFillSync`, `timingSafeEqual`, `getHashes`, and `webcrypto`. Digests are implemented in the runtime itself, so no crypto library is linked in
+- **`url`** — the WHATWG `URL`/`URLSearchParams` classes plus the legacy `parse`/`format`/`resolve` API, `fileURLToPath`/`pathToFileURL`, and `domainToASCII`/`domainToUnicode`
+- **`querystring`** — `parse`/`stringify`/`escape`/`unescape` with the `decode`/`encode` aliases. Parsed objects have a null prototype, so a `__proto__` key in a query string cannot pollute anything
+- **`string_decoder`** — `StringDecoder` for `utf8`, `base64`, `hex`, `latin1`, and `utf16le`, holding back partial sequences so a multi-byte character is never split across chunks
+- **`fs/promises`** — the promise API over the same synchronous implementations, also reachable as `fs.promises`
+- **`timers` / `timers/promises`** — the callback forms plus promise `setTimeout`/`setImmediate`, `setInterval` as an async generator, and `scheduler.wait`
 - **`Buffer`** — full `Uint8Array`-subclass implementation: `from`/`alloc`/`allocUnsafe`/`concat`/`isBuffer`/`byteLength`/`compare`, `toString`/`write`/`slice`/`copy`/`fill`/`equals`/`indexOf`/`includes`, and fixed-width int/float accessors (`readUInt32BE`, `writeDoubleLE`, …). Encodings: `utf8`, `hex`, `base64`, `base64url`, `latin1`, `ascii`, `utf16le`
 - **`TextEncoder` / `TextDecoder`** (utf-8), plus `atob` / `btoa` globals
 - **Binary file I/O:** `fs.readFileSync(path)` returns a `Buffer` (or a string when an encoding is given); `fs.writeFileSync` / `appendFileSync` accept a `Buffer`/`Uint8Array` or string
@@ -53,9 +59,11 @@ eleventyNavigation:
 ## Limitations
 
 - No networking (WASI Preview 1 has no socket API); `fetch` exists but rejects with a clear error
-- No worker threads
+- No worker threads (`worker_threads` reports `isMainThread: true`; constructing a `Worker` throws)
 - No native addons (.node files)
-- Built-in modules cover common APIs but not everything — `require('crypto')`/`require('url')` are not implemented as modules (the `crypto`/`URL` *globals* are — see above), and `http`/`https`/`net` (no sockets under WASI), `querystring`, `zlib`, `child_process`, `worker_threads` are not implemented; `fs` is synchronous-only (no callback/promise API, no `fs.createReadStream`)
+- Built-in modules cover common APIs but not everything. `http`/`https`/`net` are absent (no sockets under WASI). `zlib`, `child_process`, and `worker_threads` are *present but throw* `ERR_NOT_SUPPORTED` when used, with a message naming the constraint: a package that merely imports one keeps working, and one that calls it gets a clear error instead of "Cannot find module"
+- `fs` is synchronous under the hood. `fs/promises` and `fs.promises` wrap the same calls, so they resolve immediately rather than doing real async I/O, and `fs.createReadStream` is unavailable
+- `crypto` offers `sha256`/`sha1`/`md5` only; other digests throw an error naming the ones that exist. There is no `createCipheriv`, no key generation, and no certificate handling
 - `Buffer` covers the common API but not everything (e.g. `swap16`/`swap32`, `BigInt64` accessors); `TextDecoder` is utf-8 only
 - `stream` is a pragmatic subset (no full backpressure/highWaterMark semantics, no async iterators); `util.inspect` output approximates Node's but is not byte-identical
 - Timers return a numeric id (browser-style), not a Node `Timeout` object — `.ref()`/`.unref()` are unavailable. `process.nextTick` is a microtask (no separate higher-priority queue), and the trailing-args forms are supported
@@ -154,5 +162,7 @@ Three non-obvious build issues were debugged and fixed:
 - [x] CommonJS `require()` support — implemented in `main.js` (no bundler pre-pass needed)
 - [x] `Buffer` and binary `fs` reads — `Uint8Array`-subclass `Buffer`, `TextEncoder`/`TextDecoder`, and `fs.readFileSync`→`Buffer`
 - [x] `events`, `util`, `assert`, `stream` built-ins
-- [ ] `crypto`, `url`, `querystring`, `zlib` built-ins
+- [x] `crypto`, `url`, `querystring`, `string_decoder` built-ins (plus `fs/promises` and `timers/promises`)
+- [ ] `zlib`, `child_process`, `worker_threads` beyond the present-but-throwing stubs
+- [ ] `node:test` runner, `exports`-map resolution, readable `process.stdin`
 - [x] Event-loop driven `setTimeout` / `setInterval` exposed as globals (plus `setImmediate`, `queueMicrotask`, deferred `process.nextTick`)

@@ -1,0 +1,13 @@
+# Feature flags published in runtimes/swc/manifest.json. See
+# runtimes/nodejs/features.txt for why this list lives beside the source
+# rather than in the generated manifest.
+
+typescript
+tsx
+commonjs-output
+inline-helpers
+source-maps
+decorators
+decorator-metadata
+target-lowering
+jsx-automatic

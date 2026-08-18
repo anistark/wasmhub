@@ -26,20 +26,33 @@ eleventyNavigation:
 ## Capabilities
 
 - `version` — print transpiler version
-- `swc <file.ts|file.tsx>...` — transpile each input, writing a sibling `.js` file (directories preserved)
-- Types stripped (including decorators syntax in the parser)
-- TSX lowered to `React.createElement`
+- `swc [options] <file.ts|file.tsx>...` — transpile each input, writing a sibling `.js` file (directories preserved)
+- Types stripped
+- TSX lowered, to `React.createElement` or to the automatic JSX runtime
 - ES modules lowered to CommonJS with interop helpers **inlined** into the output (no `@swc/helpers` dependency at runtime)
 - Parse errors — including recoverable ones — go to stderr as `error: <file>:<line>:<col>: <message>` referencing the original TypeScript source, and any failure exits non-zero
 
 Inputs must end in `.ts` or `.tsx`, so filenames can never collide with the `version` subcommand.
 
+### Options
+
+| Option | What it does |
+|--|--|
+| `--target <version>` | Down-level the output: `es3`, `es5`, `es2015` … `es2024`, `esnext`. The default, `esnext`, lowers nothing. Each edition's syntax is lowered by the pass for that edition, so `--target es2020` keeps classes but lowers private fields, and `--target es5` lowers classes, `async`/`await` and private fields alike |
+| `--jsx <mode>` | `classic` (the default, `React.createElement`) or `automatic` (the `react/jsx-runtime` import). The tsconfig spellings `react`, `react-jsx` and `react-jsxdev` are accepted too |
+| `--jsx-import-source <pkg>` | Package the automatic runtime imports from, for `preact` and friends |
+| `--decorators` | Legacy TypeScript decorators (tsconfig `experimentalDecorators`). Without this flag, decorator syntax is parsed but passes through untransformed, which the JavaScript engine cannot execute |
+| `--decorator-metadata` | Emit `design:type` metadata (tsconfig `emitDecoratorMetadata`); implies `--decorators` |
+| `--source-map` | Write a sibling `.js.map` and link it from the emitted file with a `sourceMappingURL` comment. `sources` holds the path the input was given under, so a stack frame maps back to the original `.ts` line |
+
+Values may be written `--flag value` or `--flag=value`, and `--` ends option parsing.
+
 ## Limitations
 
 - Transpile only — no type checking
-- No source maps
 - Output is CommonJS only (by design, for the Node.js runtime)
 - Reads and writes through the WASI filesystem, so the host must pre-open the directory containing the inputs
+- Decorators are lowered only when asked for: the transform is `--decorators`, and only the legacy semantics are implemented
 
 ## Install
 
@@ -58,6 +71,11 @@ wasmrun exec --dir /path/to/src swc-73.wasm -- /path/to/src/app.ts
 
 # Multiple inputs, TSX included
 wasmrun exec --dir /path/to/src swc-73.wasm -- /path/to/src/app.ts /path/to/src/view.tsx
+
+# A tsconfig with experimentalDecorators, target and the automatic JSX runtime
+wasmrun exec --dir /path/to/src swc-73.wasm -- \
+  --decorators --target es2020 --jsx automatic --source-map \
+  /path/to/src/app.tsx
 
 # Then run the output with the Node.js runtime
 wasmrun exec --dir /path/to/src nodejs-20.wasm -- run /path/to/src/app.js
@@ -92,6 +110,8 @@ The version label is `73` — the `swc_core` major — following the upstream-ma
 
 ## Roadmap
 
-- [ ] Source map output
-- [ ] Configurable JSX pragma / automatic JSX runtime
+- [x] Source map output
+- [x] Automatic JSX runtime and a configurable import source
+- [x] Decorators and `--target` down-levelling
+- [ ] Configurable JSX pragma for the classic runtime
 - [ ] ESM output mode (once the Node.js runtime supports ES modules)

@@ -4,6 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 RUNTIMES_DIR="${PROJECT_ROOT}/runtimes/nodejs"
+
+# shellcheck source=scripts/lib/features.sh
+source "${SCRIPT_DIR}/lib/features.sh"
 BUILD_DIR="${PROJECT_ROOT}/build/nodejs"
 
 NODE_VERSION="${NODE_VERSION:-20}"
@@ -189,8 +192,13 @@ echo "  SHA256: ${SHA256}"
 
 cp "${OUTPUT_PATH}" "${RUNTIMES_DIR}/"
 
+# The feature list lives beside the runtime source, not in this script and not
+# in the generated manifest, so adding a feature and publishing it are the same
+# change. A hardcoded list here silently overwrote the manifest at release time.
+FEATURES=$(read_features "${RUNTIMES_DIR}/features.txt")
+
 "${SCRIPT_DIR}/generate-metadata.sh" \
     --language nodejs \
     --version "${NODE_VERSION}" \
     --file "${RUNTIMES_DIR}/${OUTPUT_NAME}" \
-    --features "eval,esm,require,commonjs,filesystem,stdio,env,path,fs,os,process,timers,async,buffer,events,util,assert,stream,url,crypto,structured-clone"
+    --features "${FEATURES}"

@@ -58,6 +58,15 @@ MANIFEST_FILE="${RUNTIME_DIR}/manifest.json"
 FEATURES_JSON="[]"
 if [[ -n "${FEATURES}" ]]; then
     FEATURES_JSON=$(echo "${FEATURES}" | tr ',' '\n' | sed 's/^/"/;s/$/"/' | tr '\n' ',' | sed 's/,$//' | sed 's/^/[/;s/$/]/')
+elif [[ -f "${MANIFEST_FILE}" ]] && command -v jq &> /dev/null; then
+    # No --features given: keep what this version already advertises rather
+    # than replacing it with an empty list. A caller that forgets the flag
+    # should not silently strip a runtime's published capabilities.
+    EXISTING=$(jq -c --arg ver "${VERSION}" '.versions[$ver].features // empty' "${MANIFEST_FILE}")
+    if [[ -n "${EXISTING}" ]]; then
+        FEATURES_JSON="${EXISTING}"
+        echo "Note: no --features given, keeping the ${VERSION} list already in the manifest"
+    fi
 fi
 
 if [[ -f "${MANIFEST_FILE}" ]]; then

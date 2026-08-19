@@ -8,10 +8,11 @@
 // module body during linking), so a shim with no `out` loads the definitions
 // without running anything.
 //
-// This covers the modules that are pure computation: querystring,
-// string_decoder, url, and the crypto hashes. Anything touching the
-// filesystem or the event loop still needs the fixtures in ./fixtures, run
-// against a built runtime.
+// The shims are backed by an in-memory filesystem and stdin buffer that a test
+// supplies through `loadRuntime({ files, stdin })`, which is what lets the
+// module resolver and the stdin path be tested here rather than only against a
+// built runtime. Anything touching the real event loop still needs the
+// fixtures in ./fixtures.
 
 import { readFile, writeFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -21,11 +22,70 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MAIN_JS = join(HERE, '../../../runtimes/nodejs/main.js');
 
+// The shims read their state from a per-load object on globalThis, keyed by
+// the module's own temp path, so two runtimes loaded in one test file cannot
+// see each other's files.
 const SHIMS = `
 // Injected by tests/runtimes/nodejs/harness.mjs.
 // No \`out\`: that is what keeps main.js from dispatching a command on load.
-const std = { getenviron: () => ({}) };
-const os = {};
+const __h = globalThis.__wasmhubHarness[__HARNESS_KEY__];
+
+const S_IFREG = 0o100000;
+const S_IFDIR = 0o40000;
+
+function __entry(p) {
+    if (Object.prototype.hasOwnProperty.call(__h.files, p)) return __h.files[p];
+    // A path with children is a directory.
+    const prefix = p.endsWith('/') ? p : p + '/';
+    for (const k of Object.keys(__h.files)) {
+        if (k.startsWith(prefix)) return null;
+    }
+    return undefined;
+}
+
+function __fileHandle(content) {
+    const bytes = new TextEncoder().encode(content);
+    let pos = 0;
+    return {
+        read(buffer, offset, length) {
+            const n = Math.min(length, bytes.length - pos);
+            if (n <= 0) return 0;
+            new Uint8Array(buffer).set(bytes.subarray(pos, pos + n), offset);
+            pos += n;
+            return n;
+        },
+        readAsString() { const s = content.slice(pos); pos = bytes.length; return s; },
+        eof() { return pos >= bytes.length; },
+        close() {},
+    };
+}
+
+const std = {
+    getenviron: () => __h.env,
+    loadFile: (p) => (typeof __entry(p) === 'string' ? __entry(p) : null),
+    open: (p) => (typeof __entry(p) === 'string' ? __fileHandle(__entry(p)) : null),
+    in: {
+        read(buffer, offset, length) {
+            const n = Math.min(length, __h.stdin.length - __h.stdinPos);
+            if (n <= 0) return 0;
+            new Uint8Array(buffer).set(__h.stdin.subarray(__h.stdinPos, __h.stdinPos + n), offset);
+            __h.stdinPos += n;
+            return n;
+        },
+    },
+};
+
+const os = {
+    getcwd: () => [__h.cwd, 0],
+    stat: (p) => {
+        const e = __entry(p);
+        if (e === undefined) return [null, 2 /* ENOENT */];
+        return [{
+            mode: e === null ? S_IFDIR : S_IFREG,
+            size: e === null ? 0 : new TextEncoder().encode(e).length,
+        }, 0];
+    },
+};
 const scriptArgs = [];
 `;
 
@@ -44,15 +104,39 @@ export {
     sha1,
     md5,
     utf8CompleteLength,
+    tty,
+    fs,
+    Readable,
+    resolveModule,
+    makeRequire,
+    readStdinBytes,
+    makeStdinStream,
+    nodeTest,
+    setupGlobals,
 };
 `;
 
+let seq = 0;
+
 /// Load main.js and return its module namespace.
-export async function loadRuntime() {
+///
+/// `files` maps absolute paths to file contents; any path with children is
+/// treated as a directory. `stdin` is a string or Buffer served on fd 0.
+export async function loadRuntime(options = {}) {
+    const key = `run${seq++}`;
+    globalThis.__wasmhubHarness = globalThis.__wasmhubHarness || {};
+    globalThis.__wasmhubHarness[key] = {
+        files: options.files || {},
+        env: options.env || {},
+        cwd: options.cwd || '/',
+        stdin: Buffer.from(options.stdin || ''),
+        stdinPos: 0,
+    };
+
     const source = await readFile(MAIN_JS, 'utf8');
     const patched = source
         .replace('import * as std from "std";', '')
-        .replace('import * as os from "os";', SHIMS);
+        .replace('import * as os from "os";', SHIMS.replace('__HARNESS_KEY__', JSON.stringify(key)));
 
     if (patched.includes('import * as std')) {
         throw new Error('harness could not rewrite the std/os imports; did main.js change its header?');

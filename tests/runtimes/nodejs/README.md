@@ -16,10 +16,16 @@ fixtures/
   stream.js           # stream — Readable.from/Transform/Writable/PassThrough/pipe
   webglobals.js       # URL/URLSearchParams, structuredClone, crypto, fetch stub
   builtins.js         # fs/promises, timers/promises, crypto entropy, module stubs
+  stdin.js            # process.stdin, fs.readFileSync(0), tty, node:process
+  testrunner.js       # the node:test runner: TAP output and exit code
+  resolver.js         # package.json "exports": conditions, subpaths, encapsulation
   node_modules/
     greet/
       package.json    # main: src/greet.js
       src/greet.js    # nested package main
+    exported/
+      package.json    # exports map: conditions, a subpath, a pattern, a null
+      lib/            # main.cjs / main.mjs / sub.js / feature/one.js / private.js
 ```
 
 ## Running
@@ -187,8 +193,13 @@ imports shimmed out, and `builtins.test.mjs` checks the results against node's
 own implementations, so a divergence shows up as a test failure rather than as
 a surprise inside somebody's sandbox. This runs in `just ci`.
 
-What the harness cannot cover is anything touching the filesystem or the event
-loop. That is what `fixtures/builtins.js` is for, and it needs a built runtime:
+The harness serves an in-memory filesystem and a stdin buffer, so the module
+resolver (`resolver.test.mjs`), standard input (`stdin.test.mjs`) and the
+`node:test` runner (`nodetest.test.mjs`) are covered here too.
+
+What it cannot cover is the real event loop, real WASI, and the runner's own
+process exit. That is what `fixtures/builtins.js`, `fixtures/stdin.js` and
+`fixtures/testrunner.js` are for, and they need a built runtime:
 
 ```sh
 wasmrun exec \
@@ -206,4 +217,63 @@ timers/promises=ok
 crypto=ok
 stubs=ok
 builtins=pass
+```
+
+### Standard input (`stdin.js`)
+
+Needs bytes on fd 0, so it is the one fixture whose input comes from the host:
+
+```sh
+echo -n 'hello from the host' | wasmrun exec \
+  --dir tests/runtimes/nodejs/fixtures \
+  runtimes/nodejs/nodejs-20.wasm -- \
+  run tests/runtimes/nodejs/fixtures/stdin.js
+```
+
+Expected output:
+
+```
+stdin.stream=ok
+stdin.fs=ok
+stdin.tty=ok
+stdin.process=ok
+stdin=pass
+```
+
+### Test runner (`testrunner.js`)
+
+```sh
+wasmrun exec \
+  --dir tests/runtimes/nodejs/fixtures \
+  runtimes/nodejs/nodejs-20.wasm -- \
+  run tests/runtimes/nodejs/fixtures/testrunner.js
+```
+
+Prints TAP 13 for four tests (one skipped, one todo) and exits 0. Run it under
+real node for the reference output and diff the two, ignoring `duration_ms`:
+
+```sh
+node --test-reporter=tap --test tests/runtimes/nodejs/fixtures/testrunner.js
+```
+
+Set `WASMHUB_TEST_FAIL=1` in the sandbox environment to add a failing test:
+the run must then exit 1, which is how wasmrun surfaces a failed test run.
+
+### Module resolution (`resolver.js`)
+
+```sh
+wasmrun exec \
+  --dir tests/runtimes/nodejs/fixtures \
+  runtimes/nodejs/nodejs-20.wasm -- \
+  run tests/runtimes/nodejs/fixtures/resolver.js
+```
+
+Expected output:
+
+```
+exports.root=ok
+exports.subpath=ok
+exports.encapsulation=ok
+legacy.main=ok
+resolver=pass
 ```

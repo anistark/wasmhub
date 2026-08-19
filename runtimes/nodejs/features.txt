@@ -1,0 +1,43 @@
+# Feature flags published in runtimes/nodejs/manifest.json.
+#
+# This file is the source of truth: scripts/build-nodejs.sh reads it and hands
+# the list to generate-metadata.sh at build time. Add a feature here in the same
+# change that implements it. Do not edit the list in manifest.json by hand: that
+# file is regenerated on every build, so a hand-added entry is lost at the next
+# release (which is how v0.4.0 shipped the v0.3.2 feature set).
+#
+# One feature per line. Blank lines and # comments are ignored.
+
+eval
+esm
+require
+commonjs
+filesystem
+stdio
+env
+path
+fs
+os
+process
+timers
+async
+buffer
+events
+util
+assert
+stream
+url
+crypto
+structured-clone
+querystring
+string-decoder
+fs-promises
+timers-promises
+zlib-stub
+worker-threads-stub
+child-process-stub
+process-module
+tty
+stdin
+node-test
+exports-map

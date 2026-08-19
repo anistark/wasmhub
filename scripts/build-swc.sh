@@ -13,6 +13,10 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
 RUNTIMES_DIR="${PROJECT_ROOT}/runtimes/swc"
+
+# shellcheck source=scripts/lib/features.sh
+source "${SCRIPT_DIR}/lib/features.sh"
+
 BUILD_DIR="${PROJECT_ROOT}/build/swc"
 
 # Version label = swc_core major (mirrors nodejs-20 / rust-1.84 upstream-major naming)
@@ -134,8 +138,10 @@ echo "  SHA256: ${SHA256}"
 mkdir -p "${RUNTIMES_DIR}"
 cp "${OUTPUT_PATH}" "${RUNTIMES_DIR}/"
 
+FEATURES=$(read_features "${RUNTIMES_DIR}/features.txt")
+
 "${SCRIPT_DIR}/generate-metadata.sh" \
     --language swc \
     --version "${SWC_VERSION}" \
     --file "${RUNTIMES_DIR}/${OUTPUT_NAME}" \
-    --features "typescript,tsx,commonjs-output,inline-helpers"
+    --features "${FEATURES}"

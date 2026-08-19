@@ -555,6 +555,10 @@ const fs = {
 
     readFileSync(p, options) {
         const enc = typeof options === 'string' ? options : (options && options.encoding) || null;
+        if (isStdinPath(p)) {
+            const input = readStdinBytes();
+            return enc ? input.toString(enc) : Buffer.from(input);
+        }
         const [st, serr] = os.stat(p);
         const size = (!serr && st) ? st.size : -1;
         const f = std.open(p, "rb");
@@ -1153,6 +1157,33 @@ class Readable extends Stream {
         if (typeof dest.emit === "function") dest.emit("pipe", this);
         return dest;
     }
+    // `for await (const chunk of stream)`. Reads in flowing mode and pauses
+    // between chunks, so a slow consumer does not buffer the whole source.
+    [Symbol.asyncIterator]() {
+        const self = this;
+        const queue = [];
+        let ended = false, failed = null, waiting = null;
+        const settle = () => {
+            if (!waiting) return;
+            if (queue.length > 0) { const w = waiting; waiting = null; w.resolve({ value: queue.shift(), done: false }); }
+            else if (failed) { const w = waiting; waiting = null; w.reject(failed); }
+            else if (ended) { const w = waiting; waiting = null; w.resolve({ value: undefined, done: true }); }
+        };
+        this.on("data", (chunk) => { queue.push(chunk); self.pause(); settle(); });
+        this.on("end", () => { ended = true; settle(); });
+        this.on("error", (err) => { failed = err; settle(); });
+        return {
+            next() {
+                if (queue.length > 0) { self.resume(); return Promise.resolve({ value: queue.shift(), done: false }); }
+                if (failed) return Promise.reject(failed);
+                if (ended) return Promise.resolve({ value: undefined, done: true });
+                self.resume();
+                return new Promise((resolve, reject) => { waiting = { resolve, reject }; });
+            },
+            return() { self.pause(); return Promise.resolve({ value: undefined, done: true }); },
+            [Symbol.asyncIterator]() { return this; },
+        };
+    }
 }
 Readable.from = function (iterable, options) {
     const r = new Readable(Object.assign({ objectMode: true }, options));
@@ -1304,6 +1335,59 @@ Stream.pipeline = pipeline;
 const eventsModule = EventEmitter;
 const assertModule = assert;
 const streamModule = Stream;
+
+// ═══ Standard input ═══════════════════════════════════════════════════════════
+// fd 0 can only be drained once, so the bytes are read on first use and kept.
+// process.stdin, fs.readFileSync('/dev/stdin') and fs.readFileSync(0) then all
+// see the same input whichever one the program reaches for first.
+
+const STDIN_CHUNK = 65536;
+let _stdinBytes = null;
+
+function readStdinBytes() {
+    if (_stdinBytes) return _stdinBytes;
+
+    const chunks = [];
+    let total = 0;
+    if (std.in && typeof std.in.read === "function") {
+        const tmp = new ArrayBuffer(STDIN_CHUNK);
+        for (;;) {
+            let n;
+            try {
+                n = std.in.read(tmp, 0, STDIN_CHUNK);
+            } catch (_) {
+                break; // an unreadable fd 0 reads as no input, never as a throw
+            }
+            if (!n || n <= 0) break;
+            chunks.push(Buffer.from(tmp.slice(0, n)));
+            total += n;
+        }
+    }
+    _stdinBytes = Buffer.concat(chunks, total);
+    return _stdinBytes;
+}
+
+function isStdinPath(p) {
+    return p === 0 || p === "/dev/stdin" || p === "/proc/self/fd/0";
+}
+
+/// A Readable over fd 0. The read is deferred to the first consumer, so a
+/// program that never touches stdin never blocks on it.
+function makeStdinStream() {
+    let drained = false;
+    const stream = new Readable({
+        read() {
+            if (drained) return;
+            drained = true;
+            const data = readStdinBytes();
+            if (data.length > 0) this.push(data);
+            this.push(null);
+        },
+    });
+    stream.fd = 0;
+    stream.isTTY = false;
+    return stream;
+}
 
 // ═══ Web platform globals (URL, URLSearchParams, crypto, structuredClone) ════
 
@@ -2411,6 +2495,337 @@ const timersPromises = {
     },
 };
 
+// ═══ node:test ════════════════════════════════════════════════════════════════
+// Registration is synchronous, the run starts once the entry module's body has
+// returned, and the report is TAP 13 shaped like Node's own so existing parsers
+// read it.
+
+const _testRun = {
+    stack: [],
+    scheduled: false,
+    counts: { tests: 0, suites: 0, pass: 0, fail: 0, skipped: 0, todo: 0 },
+};
+
+function _newSuite(name) {
+    return {
+        kind: 'suite',
+        name,
+        children: [],
+        hooks: { before: [], after: [], beforeEach: [], afterEach: [] },
+        skip: false,
+        todo: false,
+    };
+}
+
+_testRun.root = _newSuite('');
+
+function _currentSuite() {
+    return _testRun.stack.length ? _testRun.stack[_testRun.stack.length - 1] : _testRun.root;
+}
+
+function _testWrite(text) {
+    if (globalThis.process && process.stdout && typeof process.stdout.write === 'function') {
+        process.stdout.write(text);
+        return;
+    }
+    std.out.puts(text);
+    std.out.flush();
+}
+
+function _indent(depth) { return '    '.repeat(depth); }
+
+function _parseTestArgs(args) {
+    let name, options = {}, fn;
+    for (const arg of args) {
+        if (typeof arg === 'string') name = arg;
+        else if (typeof arg === 'function') fn = arg;
+        else if (arg && typeof arg === 'object') options = arg;
+    }
+    return { name: name || (fn && fn.name) || '<anonymous>', options, fn };
+}
+
+/// Run a test body or hook. A second parameter means the callback style, which
+/// finishes when `done` is called rather than when the function returns.
+function _callTestFn(fn, ctx) {
+    if (fn.length >= 2) {
+        return new Promise((resolve, reject) => {
+            let settled = false;
+            const done = (err) => {
+                if (settled) return;
+                settled = true;
+                err ? reject(err) : resolve();
+            };
+            try {
+                const r = fn(ctx, done);
+                if (r && typeof r.then === 'function') r.then(() => done(), done);
+            } catch (e) {
+                done(e);
+            }
+        });
+    }
+    return Promise.resolve(fn(ctx));
+}
+
+function _yamlQuote(value) {
+    return `'${String(value).split('\n')[0].replace(/'/g, "''")}'`;
+}
+
+function _reportBlock(pad, fields) {
+    let out = `${pad}  ---\n`;
+    for (const [key, value] of fields) {
+        if (value === undefined || value === null) continue;
+        if (key === 'stack') {
+            out += `${pad}  stack: |-\n`;
+            for (const line of String(value).split('\n')) out += `${pad}    ${line}\n`;
+        } else {
+            out += `${pad}  ${key}: ${value}\n`;
+        }
+    }
+    return out + `${pad}  ...\n`;
+}
+
+function _registerTest(args, defaults) {
+    const { name, options, fn } = _parseTestArgs(args);
+    const node = {
+        kind: 'test',
+        name,
+        fn,
+        skip: !!(options.skip || defaults.skip) || !fn,
+        todo: !!(options.todo || defaults.todo),
+        skipMessage: typeof options.skip === 'string' ? options.skip : undefined,
+        todoMessage: typeof options.todo === 'string' ? options.todo : undefined,
+    };
+    _currentSuite().children.push(node);
+    _scheduleRun();
+    return node.promise = new Promise((resolve) => { node.resolve = resolve; });
+}
+
+function _registerSuite(args, defaults) {
+    const { name, options, fn } = _parseTestArgs(args);
+    const suite = _newSuite(name);
+    suite.skip = !!(options.skip || defaults.skip);
+    suite.todo = !!(options.todo || defaults.todo);
+
+    _currentSuite().children.push(suite);
+    if (fn && !suite.skip && !suite.todo) {
+        _testRun.stack.push(suite);
+        try {
+            fn();
+        } finally {
+            _testRun.stack.pop();
+        }
+    }
+    _scheduleRun();
+    return Promise.resolve();
+}
+
+async function _runTestNode(node, depth, eachHooks) {
+    const pad = _indent(depth);
+    _testWrite(`${pad}# Subtest: ${node.name}\n`);
+
+    const started = Date.now();
+    const ctx = {
+        name: node.name,
+        skip(message) { node.skip = true; if (message) node.skipMessage = message; },
+        todo(message) { node.todo = true; if (message) node.todoMessage = message; },
+        diagnostic(message) { _testWrite(`${pad}# ${message}\n`); },
+    };
+
+    let error = null;
+    // A todo body still runs, as it does in node: that is how a todo that has
+    // started working shows up. Only skip suppresses the body.
+    if (!node.skip && node.fn) {
+        try {
+            for (const hook of eachHooks.beforeEach) await _callTestFn(hook, ctx);
+            await _callTestFn(node.fn, ctx);
+        } catch (e) {
+            error = e;
+        }
+        // afterEach runs even when the body threw, so a failing test still
+        // releases whatever it set up.
+        for (const hook of eachHooks.afterEach) {
+            try {
+                await _callTestFn(hook, ctx);
+            } catch (e) {
+                if (!error) error = e;
+            }
+        }
+    }
+
+    const duration = Date.now() - started;
+    _testRun.counts.tests += 1;
+
+    let directive = '';
+    if (node.todo) {
+        directive = ' # TODO' + (node.todoMessage ? ` ${node.todoMessage}` : '');
+        _testRun.counts.todo += 1;
+    } else if (node.skip) {
+        directive = ' # SKIP' + (node.skipMessage ? ` ${node.skipMessage}` : '');
+        _testRun.counts.skipped += 1;
+    }
+
+    // A failing todo is reported as `not ok`, but it never fails the run:
+    // that is the whole point of marking it todo.
+    const failed = !!error && !node.todo;
+    if (failed) _testRun.counts.fail += 1;
+    else if (!node.skip && !node.todo && !error) _testRun.counts.pass += 1;
+
+    const fields = [['duration_ms', duration]];
+    if (error) {
+        fields.push(['failureType', "'testCodeFailure'"]);
+        fields.push(['error', _yamlQuote(error && error.message ? error.message : error)]);
+        fields.push(['code', _yamlQuote((error && error.code) || 'ERR_TEST_FAILURE')]);
+        if (error && error.stack) fields.push(['stack', error.stack]);
+    }
+
+    if (node.resolve) node.resolve();
+    return { ok: !error, failed, directive, block: _reportBlock(pad, fields) };
+}
+
+async function _runSuiteNode(suite, depth, inherited) {
+    const pad = _indent(depth);
+    _testWrite(`${pad}# Subtest: ${suite.name}\n`);
+
+    const started = Date.now();
+    _testRun.counts.suites += 1;
+
+    let directive = '';
+    if (suite.todo) directive = ' # TODO';
+    else if (suite.skip) directive = ' # SKIP';
+
+    let error = null;
+    let failedChildren = 0;
+    if (!suite.skip && !suite.todo) {
+        const eachHooks = {
+            beforeEach: inherited.beforeEach.concat(suite.hooks.beforeEach),
+            // Inner afterEach hooks run before outer ones, unwinding the way
+            // they were set up.
+            afterEach: suite.hooks.afterEach.concat(inherited.afterEach),
+        };
+        try {
+            for (const hook of suite.hooks.before) await _callTestFn(hook, {});
+            failedChildren = await _runChildren(suite.children, depth + 1, eachHooks);
+        } catch (e) {
+            error = e;
+        }
+        for (const hook of suite.hooks.after) {
+            try {
+                await _callTestFn(hook, {});
+            } catch (e) {
+                if (!error) error = e;
+            }
+        }
+    }
+
+    const fields = [['duration_ms', Date.now() - started], ['type', "'suite'"]];
+    if (error) {
+        _testRun.counts.fail += 1;
+        fields.push(['failureType', "'hookFailed'"]);
+        fields.push(['error', _yamlQuote(error.message || error)]);
+        fields.push(['code', _yamlQuote(error.code || 'ERR_TEST_FAILURE')]);
+        if (error.stack) fields.push(['stack', error.stack]);
+    } else if (failedChildren > 0) {
+        // The children already counted themselves; the suite reports their
+        // failure without being counted again.
+        fields.push(['failureType', "'subtestsFailed'"]);
+        fields.push(['error', _yamlQuote(`${failedChildren} subtest${failedChildren === 1 ? '' : 's'} failed`)]);
+        fields.push(['code', "'ERR_TEST_FAILURE'"]);
+    }
+
+    const ok = !error && failedChildren === 0;
+    return { ok, failed: !ok, directive, block: _reportBlock(pad, fields) };
+}
+
+/// Run one level of children, print its TAP plan, and return how many failed.
+/// Numbering restarts at every level, as it does in Node.
+async function _runChildren(children, depth, eachHooks) {
+    const pad = _indent(depth);
+    let index = 0;
+    let failed = 0;
+
+    for (const child of children) {
+        index += 1;
+        const result = child.kind === 'suite'
+            ? await _runSuiteNode(child, depth, eachHooks)
+            : await _runTestNode(child, depth, eachHooks);
+        _testWrite(`${pad}${result.ok ? 'ok' : 'not ok'} ${index} - ${child.name}${result.directive}\n`);
+        _testWrite(result.block);
+            if (result.failed) failed += 1;
+    }
+
+    _testWrite(`${pad}1..${index}\n`);
+    return failed;
+}
+
+async function _runAllTests() {
+    const started = Date.now();
+    _testWrite('TAP version 13\n');
+
+    const root = _testRun.root;
+    const eachHooks = {
+        beforeEach: root.hooks.beforeEach.slice(),
+        afterEach: root.hooks.afterEach.slice(),
+    };
+
+    try {
+        for (const hook of root.hooks.before) await _callTestFn(hook, {});
+        await _runChildren(root.children, 0, eachHooks);
+        for (const hook of root.hooks.after) await _callTestFn(hook, {});
+    } catch (e) {
+        _testRun.counts.fail += 1;
+        _testWrite(`# ${e && e.message ? e.message : e}\n`);
+    }
+
+    const c = _testRun.counts;
+    _testWrite(`# tests ${c.tests}\n`);
+    _testWrite(`# suites ${c.suites}\n`);
+    _testWrite(`# pass ${c.pass}\n`);
+    _testWrite(`# fail ${c.fail}\n`);
+    _testWrite(`# cancelled 0\n`);
+    _testWrite(`# skipped ${c.skipped}\n`);
+    _testWrite(`# todo ${c.todo}\n`);
+    _testWrite(`# duration_ms ${Date.now() - started}\n`);
+
+    if (c.fail > 0) {
+        // The exit code is how wasmrun surfaces a failing test run, so it has
+        // to be set here rather than left to the caller.
+        if (globalThis.process) {
+            process.exitCode = 1;
+            if (typeof process.exit === 'function') process.exit(1);
+        }
+    }
+}
+
+function _scheduleRun() {
+    if (_testRun.scheduled) return;
+    _testRun.scheduled = true;
+    // A microtask, so registration finishes first: the entry module's body has
+    // returned by the time the queue is drained.
+    Promise.resolve().then(() => _runAllTests());
+}
+
+function test(...args) { return _registerTest(args, {}); }
+test.skip = (...args) => _registerTest(args, { skip: true });
+test.todo = (...args) => _registerTest(args, { todo: true });
+
+function describe(...args) { return _registerSuite(args, {}); }
+describe.skip = (...args) => _registerSuite(args, { skip: true });
+describe.todo = (...args) => _registerSuite(args, { todo: true });
+
+const it = test;
+const suite = describe;
+
+const nodeTest = Object.assign(test, {
+    test,
+    it,
+    describe,
+    suite,
+    before(fn) { _currentSuite().hooks.before.push(fn); },
+    after(fn) { _currentSuite().hooks.after.push(fn); },
+    beforeEach(fn) { _currentSuite().hooks.beforeEach.push(fn); },
+    afterEach(fn) { _currentSuite().hooks.afterEach.push(fn); },
+});
+
 // ═══ Modules the sandbox cannot provide ═══════════════════════════════════════
 // Present but throwing, deliberately: absent, they fail at require() time with
 // "Cannot find module", which reads as a broken runtime. This way a package
@@ -2458,6 +2873,33 @@ const workerThreads = {
     Worker,
 };
 
+// ═══ tty ══════════════════════════════════════════════════════════════════════
+// Nothing in the sandbox is a terminal, so isatty is honest rather than
+// stubbed and the stream classes throw instead of opening a device.
+
+function ttyUnavailable(name) {
+    return class {
+        constructor() {
+            const e = new Error(`tty.${name} is not supported in this sandbox: there is no terminal device`);
+            e.code = 'ERR_NOT_SUPPORTED';
+            throw e;
+        }
+    };
+}
+
+const tty = {
+    isatty(fd) {
+        if (typeof fd !== 'number' || !Number.isInteger(fd)) {
+            const e = new TypeError('The "fd" argument must be of type number');
+            e.code = 'ERR_INVALID_ARG_TYPE';
+            throw e;
+        }
+        return false;
+    },
+    ReadStream: ttyUnavailable('ReadStream'),
+    WriteStream: ttyUnavailable('WriteStream'),
+};
+
 // ═══ Built-in module registry ════════════════════════════════════════════════
 
 const builtins = {
@@ -2479,12 +2921,31 @@ const builtins = {
     'zlib': zlib,
     'worker_threads': workerThreads,
     'child_process': childProcess,
+    'tty': tty,
 };
 
-// Derived rather than listed twice, so the two cannot drift.
+// `require('process')` must hand back the same object as the global, which
+// setupGlobals builds later: an accessor keeps the two identical instead of
+// snapshotting an undefined value at load time.
+Object.defineProperty(builtins, 'process', {
+    get() { return globalThis.process; },
+    enumerable: true,
+    configurable: true,
+});
+
+// Derived rather than listed twice, so the two cannot drift. Descriptors are
+// copied rather than values, so an accessor entry stays live under its alias.
 for (const name of Object.keys(builtins)) {
-    builtins[`node:${name}`] = builtins[name];
+    Object.defineProperty(
+        builtins,
+        `node:${name}`,
+        Object.getOwnPropertyDescriptor(builtins, name),
+    );
 }
+
+// The test runner is prefix-only, as in Node: bare `require('test')` resolves
+// to a package named "test", not to the runner.
+builtins['node:test'] = nodeTest;
 
 // ═══ Module loader (CommonJS require) ════════════════════════════════════════
 
@@ -2545,12 +3006,158 @@ function resolveAsDirectory(base) {
     return resolveAsFile(base + '/index');
 }
 
-function resolveNodeModules(name, fromDir) {
+// ── package.json "exports" ────────────────────────────────────────────────────
+// A package with "exports" is sealed: only what it lists is reachable.
+// Conditions are matched in the order the package wrote them, which is what the
+// spec says and what decides `{"import": …, "require": …}` correctly. "import"
+// is not in the set: the module wrapper is CommonJS, and ES module packages are
+// lowered before they get here.
+
+const EXPORTS_CONDITIONS = ['require', 'node'];
+
+function splitPackageRequest(request) {
+    const parts = request.split('/');
+    const name = request.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0];
+    const rest = request.slice(name.length);
+    return { name, subpath: rest ? '.' + rest : '.' };
+}
+
+/// Resolve one exports target to a path.
+///
+/// Returns the path, `undefined` when no condition matched, or `null` when the
+/// package blocked the subpath outright (a `null` target).
+function resolveExportsTarget(pkgDir, target, patternMatch) {
+    if (target === null) return null;
+
+    if (typeof target === 'string') {
+        // Only relative targets are addressable; anything else (a bare
+        // specifier, an absolute path) is not ours to resolve.
+        if (!target.startsWith('./')) return undefined;
+        const sub = patternMatch === null ? target : target.split('*').join(patternMatch);
+        return path.join(pkgDir, sub);
+    }
+
+    if (Array.isArray(target)) {
+        for (const alt of target) {
+            const resolved = resolveExportsTarget(pkgDir, alt, patternMatch);
+            if (resolved !== undefined) return resolved;
+        }
+        return undefined;
+    }
+
+    if (target && typeof target === 'object') {
+        for (const key of Object.keys(target)) {
+            if (key !== 'default' && !EXPORTS_CONDITIONS.includes(key)) continue;
+            const resolved = resolveExportsTarget(pkgDir, target[key], patternMatch);
+            if (resolved !== undefined) return resolved;
+        }
+        return undefined;
+    }
+
+    return undefined;
+}
+
+function resolveExports(pkgDir, exportsField, subpath) {
+    let map = exportsField;
+    const isSubpathMap = exportsField && typeof exportsField === 'object'
+        && !Array.isArray(exportsField)
+        && Object.keys(exportsField).some(k => k === '.' || k.startsWith('./'));
+
+    if (!isSubpathMap) {
+        // Shorthand: a string, an array, or a bare condition object is the
+        // root export and nothing else.
+        if (subpath !== '.') return undefined;
+        map = { '.': exportsField };
+    }
+
+    if (Object.prototype.hasOwnProperty.call(map, subpath)) {
+        return resolveExportsTarget(pkgDir, map[subpath], null);
+    }
+
+    // Subpath patterns ("./*": "./dist/*.js"). The longest matching prefix
+    // wins, so a specific key beats a catch-all.
+    let best = null;
+    for (const key of Object.keys(map)) {
+        const star = key.indexOf('*');
+        if (star < 0) continue;
+        const prefix = key.slice(0, star);
+        const suffix = key.slice(star + 1);
+        if (subpath.length < prefix.length + suffix.length) continue;
+        if (!subpath.startsWith(prefix)) continue;
+        if (suffix && !subpath.endsWith(suffix)) continue;
+        if (!best || prefix.length > best.prefix.length) best = { key, prefix, suffix };
+    }
+    if (best) {
+        const match = subpath.slice(best.prefix.length, subpath.length - best.suffix.length);
+        return resolveExportsTarget(pkgDir, map[best.key], match);
+    }
+
+    return undefined;
+}
+
+function notExportedError(request, pkgDir) {
+    const e = new Error(`Package subpath is not exported: '${request}' (from '${pkgDir}')`);
+    e.code = 'ERR_PACKAGE_PATH_NOT_EXPORTED';
+    return e;
+}
+
+/// Resolve a request inside one package directory. Throws rather than
+/// returning null once the package itself exists: a package that is present
+/// but does not export the subpath is an error, not a reason to keep searching
+/// further up the tree.
+function resolvePackage(pkgDir, subpath, request) {
+    let pkg = null;
+    try {
+        pkg = JSON.parse(tryRead(pkgDir + '/package.json'));
+    } catch (_) {
+        pkg = null;
+    }
+
+    if (pkg && pkg.exports !== undefined && pkg.exports !== null) {
+        const target = resolveExports(pkgDir, pkg.exports, subpath);
+        if (target === null) throw notExportedError(request, pkgDir);
+        if (typeof target === 'string') {
+            const asFile = resolveAsFile(target);
+            if (asFile) return asFile;
+            const asIndex = resolveAsFile(path.join(target, 'index'));
+            if (asIndex) return asIndex;
+            const e = new Error(`Cannot find module '${request}': '${target}' does not exist`);
+            e.code = 'MODULE_NOT_FOUND';
+            throw e;
+        }
+        // No condition matched. For a subpath that is the end of it; for the
+        // package root, fall through to "main", which is where an ES module
+        // package ends up once it has been lowered to CommonJS.
+        if (subpath !== '.') throw notExportedError(request, pkgDir);
+    }
+
+    const base = subpath === '.' ? pkgDir : path.join(pkgDir, subpath);
+    const asFile = resolveAsFile(base);
+    if (asFile) return asFile;
+    const asDir = resolveAsDirectory(base);
+    if (asDir) return asDir;
+
+    if (pkg) {
+        const e = new Error(`Cannot find module '${request}' (in '${pkgDir}')`);
+        e.code = 'MODULE_NOT_FOUND';
+        throw e;
+    }
+    return null;
+}
+
+function resolveNodeModules(request, fromDir) {
+    const { name, subpath } = splitPackageRequest(request);
     let dir = fromDir;
     while (true) {
         const last = path.basename(dir);
         if (last !== 'node_modules') {
-            const candidate = path.join(dir, 'node_modules', name);
+            const pkgDir = path.join(dir, 'node_modules', name);
+            if (isFile(pkgDir + '/package.json')) {
+                return resolvePackage(pkgDir, subpath, request);
+            }
+            // No manifest: a bare directory or a loose file dropped into
+            // node_modules, which the legacy rules still resolve.
+            const candidate = path.join(dir, 'node_modules', request);
             const asFile = resolveAsFile(candidate);
             if (asFile) return asFile;
             const asDir = resolveAsDirectory(candidate);
@@ -2569,7 +3176,9 @@ function resolveModule(request, fromDir) {
         e.code = 'ERR_INVALID_ARG_VALUE';
         throw e;
     }
-    if (builtins[request] !== undefined) return { builtin: true, id: request };
+    if (Object.prototype.hasOwnProperty.call(builtins, request)) {
+        return { builtin: true, id: request };
+    }
 
     if (request.startsWith('/') || request.startsWith('./') || request.startsWith('../')
         || request === '.' || request === '..') {
@@ -2774,7 +3383,7 @@ function setupGlobals(entryPath, extraArgs) {
             write(s) { std.err.puts(String(s)); std.err.flush(); return true; },
             isTTY: false,
         },
-        stdin: { isTTY: false },
+        stdin: makeStdinStream(),
         nextTick(fn, ...args) {
             if (typeof fn !== "function") {
                 throw new TypeError("process.nextTick: callback must be a function");
@@ -2830,8 +3439,8 @@ function printVersion() {
     std.out.puts(`Node.js compat: v${NODE_COMPAT_VERSION}.x\n`);
     std.out.puts(`Engine: ${ENGINE}\n`);
     std.out.puts(`Target: WASI Preview 1\n`);
-    std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, timers, async, buffer\n`);
-    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises (and node:* aliases)\n`);
+    std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, stdin, timers, async, buffer, exports-map resolution\n`);
+    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises, process, tty, node:test (and node:* aliases)\n`);
     std.out.puts(`Stubbed: zlib, worker_threads, child_process (present, throw a clear error when used)\n`);
     std.out.puts(`Globals: Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone\n`);
     std.out.flush();

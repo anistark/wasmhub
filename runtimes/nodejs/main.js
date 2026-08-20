@@ -3200,6 +3200,27 @@ function resolveModule(request, fromDir) {
     throw e;
 }
 
+/// Compile a CommonJS module body into the function that runs it.
+///
+/// `new Function` would do, but QuickJS names everything it builds that way
+/// `<input>`, so every stack frame from user code reported the same anonymous
+/// script and no frame said which file it came from. std.evalScript takes the
+/// real path (a wasmhub patch adds the `filename` option), and the wrapper's
+/// opening line is kept on the source's first line so reported line numbers
+/// are the file's own rather than shifted by the preamble.
+///
+/// Falls back to `new Function` on a QuickJS without the patch: frames lose
+/// their filename again, which is worse output but still runs.
+function compileModule(src, filename) {
+    if (typeof std.evalScript === 'function') {
+        const wrapped =
+            '(function (exports, require, module, __filename, __dirname) { ' + src + '\n})';
+        const fn = std.evalScript(wrapped, { filename });
+        if (typeof fn === 'function') return fn;
+    }
+    return new Function('exports', 'require', 'module', '__filename', '__dirname', src);
+}
+
 function loadModule(filename, parentModule) {
     if (moduleCache.has(filename)) return moduleCache.get(filename);
 
@@ -3240,7 +3261,7 @@ function loadModule(filename, parentModule) {
 
     let fn;
     try {
-        fn = new Function('exports', 'require', 'module', '__filename', '__dirname', src);
+        fn = compileModule(src, filename);
     } catch (e) {
         moduleCache.delete(filename);
         throw new Error(`Syntax error in '${filename}': ${e.message}`);
@@ -3280,7 +3301,7 @@ function makeRequire(fromDir, parentModule) {
 // js_std_loop() that the qjsc-generated main() runs after the top-level module
 // body returns. That same loop drains the Promise job queue, so async/await and
 // queueMicrotask resolve once the entry script finishes — provided we never call
-// os.exit() on the success path (we don't). We layer the Node/browser timer
+// std.exit() on the success path (we don't). We layer the Node/browser timer
 // globals on top of those primitives.
 
 const _hasOsTimer = typeof os.setTimeout === "function";
@@ -3373,7 +3394,13 @@ function setupGlobals(entryPath, extraArgs) {
         versions: { node: `${NODE_COMPAT_VERSION}.0.0`, quickjs: '2024-01-13' },
         pid: 1,
         ppid: 0,
-        exit(code) { os.exit(code | 0); },
+        // std.exit() ends the process there and then, so anything still sitting
+        // in a stdio buffer would never be written. Nothing downstream gets a
+        // chance to flush it.
+        exit(code) {
+            try { std.out.flush(); std.err.flush(); } catch (_) { /* already closed */ }
+            std.exit(code | 0);
+        },
         cwd() { return currentCwd(); },
         stdout: {
             write(s) { std.out.puts(String(s)); std.out.flush(); return true; },
@@ -3456,7 +3483,7 @@ function evalCode(code) {
         std.err.puts(`Error: ${e.message || e}\n`);
         if (e.stack) std.err.puts(e.stack + "\n");
         std.err.flush();
-        os.exit(1);
+        std.exit(1);
     }
     std.out.flush();
 }
@@ -3467,7 +3494,7 @@ function runFile(rawPath, extraArgs) {
     if (!isFile(entryPath)) {
         std.err.puts(`Error: cannot open '${entryPath}'\n`);
         std.err.flush();
-        os.exit(1);
+        std.exit(1);
     }
 
     setupGlobals(entryPath, extraArgs);
@@ -3487,20 +3514,20 @@ function runFile(rawPath, extraArgs) {
     if (src === null) {
         std.err.puts(`Error: cannot read '${entryPath}'\n`);
         std.err.flush();
-        os.exit(1);
+        std.exit(1);
     }
 
     const requireFn = makeRequire(entryDir, entryModule);
 
     try {
-        const fn = new Function('exports', 'require', 'module', '__filename', '__dirname', src);
+        const fn = compileModule(src, entryPath);
         fn.call(entryModule.exports, entryModule.exports, requireFn, entryModule, entryPath, entryDir);
         entryModule.loaded = true;
     } catch (e) {
         std.err.puts(`Error: ${e.message || e}\n`);
         if (e.stack) std.err.puts(e.stack + "\n");
         std.err.flush();
-        os.exit(1);
+        std.exit(1);
     }
 }
 
@@ -3525,7 +3552,7 @@ if (std.out) {
     const argv = scriptArgs;
     if (!argv || argv.length < 2) {
         printUsage();
-        os.exit(0);
+        std.exit(0);
     }
 
     switch (argv[1]) {
@@ -3536,7 +3563,7 @@ if (std.out) {
             if (argv.length < 3) {
                 std.err.puts("Error: eval requires a code argument\n");
                 std.err.flush();
-                os.exit(1);
+                std.exit(1);
             }
             setupGlobals(null, argv.slice(2));
             evalCode(argv.slice(2).join(" "));
@@ -3545,7 +3572,7 @@ if (std.out) {
             if (argv.length < 3) {
                 std.err.puts("Error: run requires a file path\n");
                 std.err.flush();
-                os.exit(1);
+                std.exit(1);
             }
             runFile(argv[2], argv.slice(3));
             break;
@@ -3559,6 +3586,6 @@ if (std.out) {
             std.err.puts(`Unknown command: ${argv[1]}\n`);
             std.err.flush();
             printUsage();
-            os.exit(1);
+            std.exit(1);
     }
 }

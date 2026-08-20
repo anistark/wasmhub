@@ -18,6 +18,11 @@ import { readFile, writeFile, mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import * as vm from 'node:vm';
+
+// Reachable from the injected shims, which are plain source text with no
+// imports of their own.
+globalThis.__wasmhubVm = vm;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MAIN_JS = join(HERE, '../../../runtimes/nodejs/main.js');
@@ -64,6 +69,20 @@ const std = {
     getenviron: () => __h.env,
     loadFile: (p) => (typeof __entry(p) === 'string' ? __entry(p) : null),
     open: (p) => (typeof __entry(p) === 'string' ? __fileHandle(__entry(p)) : null),
+    // Real std.exit ends the process. Recording the code and throwing a marker
+    // is the closest a test can get: execution stops at the same point, and the
+    // code is still there to assert on afterwards.
+    exit(code) {
+        __h.exitCode = code | 0;
+        const e = new Error(\`std.exit(\${__h.exitCode})\`);
+        e.__wasmhubExit = __h.exitCode;
+        throw e;
+    },
+    // Backed by node's vm so the "filename" option behaves as it does under the
+    // patched QuickJS: frames name the script and line numbers are its own.
+    evalScript(src, options) {
+        return globalThis.__wasmhubVm.runInThisContext(src, { filename: (options && options.filename) || '<evalScript>' });
+    },
     in: {
         read(buffer, offset, length) {
             const n = Math.min(length, __h.stdin.length - __h.stdinPos);
@@ -123,6 +142,13 @@ let seq = 0;
 /// `files` maps absolute paths to file contents; any path with children is
 /// treated as a directory. `stdin` is a string or Buffer served on fd 0.
 export async function loadRuntime(options = {}) {
+    return (await loadRuntimeWithState(options)).runtime;
+}
+
+/// Load main.js and return both its namespace and the harness state backing
+/// the shims, for tests that need to read what the runtime did to it —
+/// `state.exitCode` is what std.exit recorded.
+export async function loadRuntimeWithState(options = {}) {
     const key = `run${seq++}`;
     globalThis.__wasmhubHarness = globalThis.__wasmhubHarness || {};
     globalThis.__wasmhubHarness[key] = {
@@ -131,6 +157,7 @@ export async function loadRuntime(options = {}) {
         cwd: options.cwd || '/',
         stdin: Buffer.from(options.stdin || ''),
         stdinPos: 0,
+        exitCode: null,
     };
 
     const source = await readFile(MAIN_JS, 'utf8');
@@ -145,5 +172,8 @@ export async function loadRuntime(options = {}) {
     const dir = await mkdtemp(join(tmpdir(), 'wasmhub-nodejs-harness-'));
     const file = join(dir, 'main.harness.mjs');
     await writeFile(file, patched + EXPORTS);
-    return import(pathToFileURL(file).href);
+    return {
+        runtime: await import(pathToFileURL(file).href),
+        state: globalThis.__wasmhubHarness[key],
+    };
 }

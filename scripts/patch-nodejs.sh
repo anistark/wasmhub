@@ -80,6 +80,71 @@ open(path, "w").write(content)
 PYEOF
     fi
 
+    # Let std.evalScript() name the script it compiles. Stock QuickJS hardcodes
+    # "<evalScript>", so every CommonJS module main.js compiled reported the
+    # same placeholder and no stack frame said which file it came from.
+    if grep -q "wasmhub_eval_filename" "${SOURCE_DIR}/quickjs-libc.c"; then
+        echo "  [quickjs] evalScript filename option already present"
+    else
+        echo "  [quickjs] Adding evalScript filename option to quickjs-libc.c"
+        python3 - "${SOURCE_DIR}/quickjs-libc.c" <<'PYEOF'
+import sys
+
+path = sys.argv[1]
+content = open(path).read()
+
+# 1. Declare the filename locals alongside the existing option locals.
+decl_anchor = """    JSValueConst options_obj;
+    BOOL backtrace_barrier = FALSE;
+    BOOL is_async = FALSE;
+    int flags;
+"""
+if decl_anchor not in content:
+    sys.exit("quickjs-libc.c: js_evalScript locals anchor not found")
+content = content.replace(decl_anchor, decl_anchor + """    /* wasmhub: optional filename so stack frames name the real script */
+    const char *wasmhub_eval_filename = NULL;
+    JSValue wasmhub_filename_val = JS_UNDEFINED;
+""", 1)
+
+# 2. Read the option next to the ones already parsed.
+opt_anchor = """        if (get_bool_option(ctx, &is_async, options_obj,
+                            "async"))
+            return JS_EXCEPTION;
+"""
+if opt_anchor not in content:
+    sys.exit("quickjs-libc.c: js_evalScript options anchor not found")
+content = content.replace(opt_anchor, opt_anchor + """        /* wasmhub */
+        wasmhub_filename_val = JS_GetPropertyStr(ctx, options_obj, "filename");
+        if (JS_IsException(wasmhub_filename_val))
+            return JS_EXCEPTION;
+        if (!JS_IsUndefined(wasmhub_filename_val)) {
+            wasmhub_eval_filename = JS_ToCString(ctx, wasmhub_filename_val);
+            if (!wasmhub_eval_filename) {
+                JS_FreeValue(ctx, wasmhub_filename_val);
+                return JS_EXCEPTION;
+            }
+        }
+""", 1)
+
+# 3. Use it, and release both borrowed references.
+eval_anchor = """    ret = JS_Eval(ctx, str, len, "<evalScript>", flags);
+    JS_FreeCString(ctx, str);
+"""
+if eval_anchor not in content:
+    sys.exit("quickjs-libc.c: js_evalScript JS_Eval anchor not found")
+content = content.replace(eval_anchor, """    ret = JS_Eval(ctx, str, len,
+                  wasmhub_eval_filename ? wasmhub_eval_filename : "<evalScript>",
+                  flags);
+    JS_FreeCString(ctx, str);
+    if (wasmhub_eval_filename)
+        JS_FreeCString(ctx, wasmhub_eval_filename);
+    JS_FreeValue(ctx, wasmhub_filename_val);
+""", 1)
+
+open(path, "w").write(content)
+PYEOF
+    fi
+
     echo "  [quickjs] Patches applied"
     exit 0
 fi

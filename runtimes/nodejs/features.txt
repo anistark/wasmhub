@@ -41,3 +41,4 @@ tty
 stdin
 node-test
 exports-map
+named-stack-frames

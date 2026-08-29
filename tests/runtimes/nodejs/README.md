@@ -19,6 +19,7 @@ fixtures/
   stdin.js            # process.stdin, fs.readFileSync(0), tty, node:process
   testrunner.js       # the node:test runner: TAP output and exit code
   resolver.js         # package.json "exports": conditions, subpaths, encapsulation
+  httpserver.js       # inbound networking: a real listening socket from the host
   node_modules/
     greet/
       package.json    # main: src/greet.js
@@ -197,6 +198,14 @@ The harness serves an in-memory filesystem and a stdin buffer, so the module
 resolver (`resolver.test.mjs`), standard input (`stdin.test.mjs`) and the
 `node:test` runner (`nodetest.test.mjs`) are covered here too.
 
+`fakenet.mjs` adds an in-memory stand-in for the host's socket layer, which is
+what lets `net.test.mjs` and `http.test.mjs` cover the server path here rather
+than only against a built runtime. It answers with the same `[value, code]`
+pairs the real bindings do and keeps the two easy-to-conflate cases apart:
+nothing to read yet is `EAGAIN`, an orderly peer shutdown is zero bytes. Its
+`maxSend` option forces short writes, so the runtime's re-queueing path is
+exercised rather than assumed.
+
 What it cannot cover is the real event loop, real WASI, and the runner's own
 process exit. That is what `fixtures/builtins.js`, `fixtures/stdin.js` and
 `fixtures/testrunner.js` are for, and they need a built runtime:
@@ -258,6 +267,39 @@ node --test-reporter=tap --test tests/runtimes/nodejs/fixtures/testrunner.js
 
 Set `WASMHUB_TEST_FAIL=1` in the sandbox environment to add a failing test:
 the run must then exit 1, which is how wasmrun surfaces a failed test run.
+
+### Inbound networking (`httpserver.js`)
+
+WASI Preview 1 cannot bind a port from inside the sandbox, so the host binds it
+and passes the descriptor in. `wasmtime run --tcplisten` does exactly that:
+
+```sh
+wasmtime run --tcplisten 127.0.0.1:8080 \
+  --env WASMHUB_LISTEN_FD=3 --env WASMHUB_LISTEN_ADDR=127.0.0.1:8080 \
+  --dir tests/runtimes/nodejs/fixtures \
+  runtimes/nodejs/nodejs-20.wasm -- \
+  run tests/runtimes/nodejs/fixtures/httpserver.js
+```
+
+Expected output on startup:
+
+```
+net.isIP=4,6,0
+connect=ERR_NOT_SUPPORTED
+listening=127.0.0.1:8080
+```
+
+Then, from another shell:
+
+```sh
+curl -s localhost:8080/hello        # {"method":"GET","url":"/hello","body":""}
+curl -s -d 'ping' localhost:8080/x  # {"method":"POST","url":"/x","body":"ping"}
+curl -s localhost:8080/stop         # stopping
+```
+
+`/stop` closes the server, after which the fixture prints `server=closed` and
+the run exits 0 on its own, which is also the check that the poll loop stops
+arming its timer once the last socket is gone.
 
 ### Module resolution (`resolver.js`)
 

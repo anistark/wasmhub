@@ -38,7 +38,7 @@ eleventyNavigation:
 - ES2020: async/await, optional chaining, nullish coalescing, BigInt
 - **CommonJS `require()`** with relative paths (`./foo`), absolute paths (`/abs`), JSON imports, `package.json` `main` resolution, and `node_modules` lookup walking up the directory tree
 - `module.exports`, `exports`, `__filename`, `__dirname`, `require.cache`, `require.resolve`, `require.main`
-- **Built-in modules:** `path`, `fs`, `fs/promises`, `os`, `buffer`, `events`, `util`, `assert`, `stream`, `crypto`, `url`, `querystring`, `string_decoder`, `timers`, `timers/promises`, `process`, `tty` (all also under the `node:` prefix), plus `node:test`, which is prefix-only as it is in Node
+- **Built-in modules:** `path`, `fs`, `fs/promises`, `os`, `buffer`, `events`, `util`, `assert`, `stream`, `crypto`, `url`, `querystring`, `string_decoder`, `timers`, `timers/promises`, `process`, `tty`, `net`, `http` (all also under the `node:` prefix), plus `node:test`, which is prefix-only as it is in Node
 - **`events`** — full `EventEmitter` (`on`/`once`/`off`/`prependListener`/`removeAllListeners`/`emit`/`listeners`/`listenerCount`/`eventNames`, the `error` special-case, `newListener`/`removeListener` meta-events, static `EventEmitter.once`)
 - **`util`** — `format`, `inspect`, `inherits`, `promisify`, `callbackify`, `deprecate`, `debuglog`, `isDeepStrictEqual`, `types.*`, `TextEncoder`/`TextDecoder`
 - **`assert`** — `ok`/`equal`/`strictEqual`/`deepStrictEqual`/`throws`/`rejects`/`ifError`/`match`/… plus `assert.strict` and `AssertionError`
@@ -50,6 +50,8 @@ eleventyNavigation:
 - **`fs/promises`** — the promise API over the same synchronous implementations, also reachable as `fs.promises`
 - **`node:test`** — the built-in test runner: `test`/`it` with sync, async, promise and callback bodies, `describe`/`suite` nesting, `before`/`after`/`beforeEach`/`afterEach`, `skip`/`todo` as methods, options or context calls, TAP 13 output shaped like Node's, and a non-zero exit code when anything fails
 - **`process`** — the same object as the `process` global, so `require('node:process')` and the global cannot diverge
+- **`net`** — inbound only: `createServer`, `Server` (`listen`/`close`/`address`/`getConnections`, `connection`/`listening`/`close`/`error` events), `Socket` as a duplex stream (`data`/`end`/`error`/`close`, `write`, `end`, `destroy`, `pipe`, `for await`), and `isIP`/`isIPv4`/`isIPv6`. `connect`/`createConnection` throw `ERR_NOT_SUPPORTED`, because Preview 1 has no way to open a socket. See [Networking](#networking)
+- **`http`** — the server half over `net`: `createServer`, `IncomingMessage` (method, url, lowercased `headers`, `rawHeaders`, body as a readable stream), `ServerResponse` (`writeHead`, `setHeader`/`getHeader`/`removeHeader`, `write`, `end`), `STATUS_CODES` and `METHODS`. Request bodies are decoded by `Content-Length` or `Transfer-Encoding: chunked`; responses are chunked automatically when their length is not known in advance, and HTTP/1.1 keep-alive is honoured when the response can delimit itself. `request`/`get` throw `ERR_NOT_SUPPORTED`
 - **`tty`** — `isatty()`, which answers `false`: nothing in the sandbox is a terminal. `ReadStream`/`WriteStream` throw `ERR_NOT_SUPPORTED` rather than pretending to open a device
 - **`timers` / `timers/promises`** — the callback forms plus promise `setTimeout`/`setImmediate`, `setInterval` as an async generator, and `scheduler.wait`
 - **`Buffer`** — full `Uint8Array`-subclass implementation: `from`/`alloc`/`allocUnsafe`/`concat`/`isBuffer`/`byteLength`/`compare`, `toString`/`write`/`slice`/`copy`/`fill`/`equals`/`indexOf`/`includes`, and fixed-width int/float accessors (`readUInt32BE`, `writeDoubleLE`, …). Encodings: `utf8`, `hex`, `base64`, `base64url`, `latin1`, `ascii`, `utf16le`
@@ -64,15 +66,66 @@ eleventyNavigation:
 
 ## Limitations
 
-- No networking (WASI Preview 1 has no socket API); `fetch` exists but rejects with a clear error
+- **Inbound networking only.** A server works when the host hands in a listening socket; nothing in the sandbox can open an outbound connection, so `net.connect`, `http.request` and `fetch` all fail with a clear error rather than hanging
 - No worker threads (`worker_threads` reports `isMainThread: true`; constructing a `Worker` throws)
 - No native addons (.node files)
-- Built-in modules cover common APIs but not everything. `http`/`https`/`net` are absent (no sockets under WASI). `zlib`, `child_process`, and `worker_threads` are *present but throw* `ERR_NOT_SUPPORTED` when used, with a message naming the constraint: a package that merely imports one keeps working, and one that calls it gets a clear error instead of "Cannot find module"
+- Built-in modules cover common APIs but not everything. `zlib`, `child_process`, `worker_threads`, `https`, `dgram` and `tls` are *present but throw* `ERR_NOT_SUPPORTED` when used, with a message naming the constraint: a package that merely imports one keeps working, and one that calls it gets a clear error instead of "Cannot find module"
 - `fs` is synchronous under the hood. `fs/promises` and `fs.promises` wrap the same calls, so they resolve immediately rather than doing real async I/O, and `fs.createReadStream` is unavailable
 - `crypto` offers `sha256`/`sha1`/`md5` only; other digests throw an error naming the ones that exist. There is no `createCipheriv`, no key generation, and no certificate handling
 - `Buffer` covers the common API but not everything (e.g. `swap16`/`swap32`, `BigInt64` accessors); `TextDecoder` is utf-8 only
 - `stream` is a pragmatic subset (no full backpressure/highWaterMark semantics), though `Readable` does support `for await`; `util.inspect` output approximates Node's but is not byte-identical
 - Timers return a numeric id (browser-style), not a Node `Timeout` object — `.ref()`/`.unref()` are unavailable. `process.nextTick` is a microtask (no separate higher-priority queue), and the trailing-args forms are supported
+
+## Networking
+
+The runtime can **serve** connections. It cannot **open** them.
+
+WASI Preview 1 standardises `sock_accept`, `sock_recv`, `sock_send` and
+`sock_shutdown`, but nothing that creates a socket: `sock_open`, `sock_bind`,
+`sock_connect` and `sock_listen` are WASIX-style extensions. A WebAssembly
+import is not optional -- declaring one obliges every host to supply it or the
+module fails to instantiate -- so this runtime imports only the standard four
+and keeps running on any host it ran on before.
+
+That means the listening socket has to come from outside, already bound. The
+host binds the port and passes the descriptor in through the environment:
+
+| Variable | Meaning |
+|---|---|
+| `WASMHUB_LISTEN_FD` | descriptor of a bound, listening socket |
+| `WASMHUB_LISTEN_ADDR` | optional `host:port` it is bound to, so `server.address()` can answer truthfully |
+
+`wasmtime run --tcplisten` already works this way:
+
+```sh
+wasmtime run --tcplisten 127.0.0.1:8080 \
+  --env WASMHUB_LISTEN_FD=3 --env WASMHUB_LISTEN_ADDR=127.0.0.1:8080 \
+  --dir ./app nodejs-20.wasm -- run ./app/server.js
+```
+
+```js
+// app/server.js
+const http = require('node:http');
+
+http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ method: req.method, url: req.url }));
+}).listen(8080, () => console.log('serving'));
+```
+
+`server.listen(port)` does not bind anything: the port is advertised for
+`address()`, and the server serves the socket it was given. A second concurrent
+`listen()` fails with `EADDRINUSE`, since one process is handed one socket.
+
+Sockets are non-blocking, and a self-scheduling timer drains them. It backs off
+while idle and stops arming once the last socket closes, so a script that
+served a request still exits on its own rather than hanging the run.
+
+When the host passes no descriptor, `listen()` emits an `ERR_SOCKET_NO_LISTENER`
+error naming the variable to set. When a build has no socket bindings at all,
+`net` and `http` take the same shape as `zlib`: present, and throwing a clear
+`ERR_NOT_SUPPORTED` when called, so a package that merely requires one keeps
+loading.
 
 ## Install
 

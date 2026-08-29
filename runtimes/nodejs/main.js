@@ -1113,15 +1113,22 @@ class Readable extends Stream {
                 if (s.encoding && Buffer.isBuffer(chunk)) chunk = chunk.toString(s.encoding);
                 this.emit("data", chunk);
                 process.nextTick(step);
-            } else if (s.ended) {
+                return;
+            }
+            if (s.ended) {
                 s.flowActive = false;
                 this._maybeEnd();
-            } else if (!s.reading) {
+                return;
+            }
+            // Nothing buffered. Ask the source for more and stop the loop:
+            // push() restarts it when data actually arrives. Re-queueing a tick
+            // here instead would spin the queue forever for any source that
+            // produces asynchronously -- a socket, for one -- and starve the
+            // timers that were going to deliver the data.
+            s.flowActive = false;
+            if (!s.reading) {
                 s.reading = true;
                 this._read(s.highWaterMark);
-                process.nextTick(step);
-            } else {
-                process.nextTick(step);
             }
         };
         step();
@@ -2826,10 +2833,889 @@ const nodeTest = Object.assign(test, {
     afterEach(fn) { _currentSuite().hooks.afterEach.push(fn); },
 });
 
+// ═══ net (inbound, over WASI Preview 1 sockets) ═══════════════════════════════
+// Preview 1 can accept, read, write and shut down a socket, but it cannot
+// create one: sock_open/bind/connect/listen are WASIX-style extensions that a
+// stock host does not implement, and a WASM import is not optional -- declaring
+// one makes every host supply it or fail to instantiate. So the listening
+// socket comes from outside, already bound, and the runtime only ever accepts
+// on it:
+//
+//   WASMHUB_LISTEN_FD    descriptor of a bound, listening socket
+//   WASMHUB_LISTEN_ADDR  optional "host:port" it is bound to, so that
+//                        server.address() can answer truthfully
+//
+// which is the shape `wasmtime run --tcplisten` already uses. Outbound connect
+// is reported as unsupported rather than faked.
+//
+// The engine runs to completion inside one host call and exposes no readiness
+// primitive, so every socket is non-blocking and a self-scheduling timer drains
+// them. It backs off while idle and stops entirely once the last socket closes,
+// which is what lets a script that used a socket still exit on its own.
+
+const HAS_SOCKETS = typeof os.sockAccept === "function" && typeof os.setTimeout === "function";
+
+const SOCK_CHUNK = 65536;
+// Reads land here first and are copied out, so one buffer serves every socket.
+let _sockScratch = null;
+function sockScratch() {
+    if (!_sockScratch) _sockScratch = new ArrayBuffer(SOCK_CHUNK);
+    return _sockScratch;
+}
+
+function sockError(code, syscall, detail) {
+    const e = new Error(`${syscall} ${code}${detail ? `: ${detail}` : ""}`);
+    e.code = code;
+    e.errno = code;
+    e.syscall = syscall;
+    return e;
+}
+
+function outboundUnsupported(api) {
+    const e = new Error(
+        `${api} is not supported in this sandbox: WASI Preview 1 has no outbound ` +
+        `connect (sock_open, sock_bind and sock_connect are host extensions), so ` +
+        `this runtime can serve connections but cannot open them.`
+    );
+    e.code = 'ERR_NOT_SUPPORTED';
+    return e;
+}
+
+// ── Poll loop ────────────────────────────────────────────────────────────────
+// Delays in milliseconds. A tick that moved bytes resets to the front, so an
+// active connection polls as fast as the timer allows and an idle one settles
+// at 20ms rather than spinning.
+const SOCK_BACKOFF = [0, 1, 4, 20];
+
+const _sockPoll = {
+    timer: null,
+    step: 0,
+    listeners: new Set(),
+    sockets: new Set(),
+};
+
+function pollSchedule() {
+    if (_sockPoll.timer !== null) return;
+    // Nothing left to watch: leaving the timer unarmed is what allows the
+    // engine's event loop to drain and the process to exit.
+    if (_sockPoll.listeners.size === 0 && _sockPoll.sockets.size === 0) return;
+    _sockPoll.timer = os.setTimeout(pollTick, SOCK_BACKOFF[_sockPoll.step]);
+}
+
+function pollTick() {
+    _sockPoll.timer = null;
+    let moved = 0;
+    // Copied, because accepting or reading can add to and remove from both sets.
+    for (const server of Array.from(_sockPoll.listeners)) moved += server._acceptPending();
+    for (const socket of Array.from(_sockPoll.sockets)) moved += socket._pump();
+    _sockPoll.step = moved > 0 ? 0 : Math.min(_sockPoll.step + 1, SOCK_BACKOFF.length - 1);
+    pollSchedule();
+}
+
+// ── Socket ───────────────────────────────────────────────────────────────────
+
+class Socket extends Duplex {
+    constructor(options) {
+        super(options || {});
+        const opts = options || {};
+        this._fd = -1;
+        this._server = null;
+        this._sockState = {
+            writeQueue: [],
+            finalCallback: null,
+            readEnded: false,
+            writeShutdown: false,
+            destroyed: false,
+        };
+        this.allowHalfOpen = !!opts.allowHalfOpen;
+        this.connecting = false;
+        this.destroyed = false;
+        this.bytesRead = 0;
+        this.bytesWritten = 0;
+        this.remoteAddress = undefined;
+        this.remotePort = undefined;
+        this.remoteFamily = undefined;
+    }
+
+    // Preview 1's sock_accept does not report who connected, and the WASIX
+    // variant that does takes a fourth argument under the same import name,
+    // which would make the binary incompatible with stock hosts. Addresses are
+    // left undefined rather than invented.
+    _adopt(fd, server) {
+        this._fd = fd;
+        this._server = server || null;
+        _sockPoll.sockets.add(this);
+        pollSchedule();
+        return this;
+    }
+
+    connect() { throw outboundUnsupported('net.Socket.connect'); }
+
+    _read() { /* the poll loop pushes; there is nothing to pull on demand */ }
+
+    _write(chunk, encoding, callback) {
+        const st = this._sockState;
+        if (st.destroyed) {
+            callback(sockError('EPIPE', 'write', 'socket has been destroyed'));
+            return;
+        }
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+        st.writeQueue.push({ buf, offset: 0, callback });
+        this._flushWrites();
+    }
+
+    _final(callback) {
+        this._sockState.finalCallback = callback;
+        this._flushWrites();
+    }
+
+    // Drains as much of the queue as the socket will take. A short write is
+    // ordinary on a non-blocking socket, so the remainder stays queued for the
+    // next tick rather than being reported as a failure.
+    _flushWrites() {
+        const st = this._sockState;
+        let moved = 0;
+        while (st.writeQueue.length > 0 && !st.destroyed) {
+            const item = st.writeQueue[0];
+            const remaining = item.buf.length - item.offset;
+            if (remaining === 0) {
+                st.writeQueue.shift();
+                if (item.callback) item.callback();
+                continue;
+            }
+            const [n, err] = os.sockSend(
+                this._fd,
+                item.buf.buffer,
+                item.buf.byteOffset + item.offset,
+                remaining,
+            );
+            if (err === 'EAGAIN') return moved;
+            if (err) {
+                this.destroy(sockError(err, 'write'));
+                return moved;
+            }
+            if (n === 0) return moved;  // made no progress; try again next tick
+            item.offset += n;
+            this.bytesWritten += n;
+            moved += n;
+        }
+        if (st.writeQueue.length === 0 && st.finalCallback && !st.destroyed) {
+            const done = st.finalCallback;
+            st.finalCallback = null;
+            if (!st.writeShutdown) {
+                st.writeShutdown = true;
+                os.sockShutdown(this._fd, 'w');
+            }
+            done();
+            // Both directions are finished: nothing else will happen on this fd.
+            if (st.readEnded) this.destroy();
+        }
+        return moved;
+    }
+
+    _readIncoming() {
+        const st = this._sockState;
+        if (st.readEnded || st.destroyed) return 0;
+        let moved = 0;
+        // Bounded, so one loud connection cannot starve the others on a tick.
+        for (let i = 0; i < 16; i++) {
+            const scratch = sockScratch();
+            const [n, err] = os.sockRecv(this._fd, scratch, 0, SOCK_CHUNK);
+            if (err === 'EAGAIN') break;
+            if (err) {
+                this.destroy(sockError(err, 'read'));
+                return moved;
+            }
+            if (n === 0) {
+                // Orderly shutdown by the peer, which is a different event from
+                // "nothing to read yet" and must not be collapsed into it.
+                st.readEnded = true;
+                this.push(null);
+                // Guarded: end() a second time would shut the write side down
+                // again and emit a second 'finish'.
+                if (!this.allowHalfOpen && !this._writableState.ended) this.end();
+                else if (this._writableState.ended || st.writeShutdown) this.destroy();
+                break;
+            }
+            this.bytesRead += n;
+            moved += n;
+            // A view, so Buffer.from copies out of the shared scratch buffer.
+            this.push(Buffer.from(new Uint8Array(scratch, 0, n)));
+            if (n < SOCK_CHUNK) break;
+        }
+        return moved;
+    }
+
+    _pump() {
+        if (this._sockState.destroyed) return 0;
+        // Writes first: a response already queued should not wait behind a read.
+        return this._flushWrites() + this._readIncoming();
+    }
+
+    destroy(err) {
+        const st = this._sockState;
+        if (st.destroyed) return this;
+        st.destroyed = true;
+        this.destroyed = true;
+        this.writable = false;
+        st.writeQueue.length = 0;
+        st.finalCallback = null;
+        if (this._fd >= 0) {
+            os.sockClose(this._fd);
+            this._fd = -1;
+        }
+        _sockPoll.sockets.delete(this);
+        if (!st.readEnded) {
+            st.readEnded = true;
+            this.push(null);
+        }
+        if (err) this.emit('error', err);
+        if (this._server) this._server._connectionClosed(this);
+        process.nextTick(() => this.emit('close', !!err));
+        return this;
+    }
+
+    address() {
+        return this._server ? this._server.address() : null;
+    }
+
+    // Kept so ordinary server code runs unchanged. Preview 1 exposes no socket
+    // options, so these record the intent and do nothing else.
+    setNoDelay() { return this; }
+    setKeepAlive() { return this; }
+    setTimeout(ms, callback) {
+        if (callback) this.once('timeout', callback);
+        return this;
+    }
+    ref() { return this; }
+    unref() { return this; }
+}
+
+// ── Server ───────────────────────────────────────────────────────────────────
+
+// One process is handed one listening socket, so a second concurrent listen is
+// refused rather than silently sharing the first server's descriptor.
+let _listenerClaimed = false;
+
+function listenEnv() {
+    return std.getenviron ? std.getenviron() : {};
+}
+
+function parseListenAddr(raw, fallbackPort) {
+    const port = typeof fallbackPort === 'number' ? fallbackPort : 0;
+    if (typeof raw !== 'string' || !raw) {
+        return { address: '0.0.0.0', family: 'IPv4', port };
+    }
+    // "[::1]:8080" as well as "127.0.0.1:8080"
+    const m = /^\[(.+)\]:(\d+)$/.exec(raw) || /^([^:]+):(\d+)$/.exec(raw);
+    if (!m) return { address: raw, family: raw.includes(':') ? 'IPv6' : 'IPv4', port };
+    return {
+        address: m[1],
+        family: m[1].includes(':') ? 'IPv6' : 'IPv4',
+        port: parseInt(m[2], 10),
+    };
+}
+
+function acquireListener(port) {
+    const env = listenEnv();
+    const raw = env.WASMHUB_LISTEN_FD;
+    if (raw === undefined || raw === '') {
+        return [null, null, sockError(
+            'ERR_SOCKET_NO_LISTENER',
+            'listen',
+            'the host passed no listening socket. WASI Preview 1 cannot bind a ' +
+            'port from inside the sandbox, so the host must bind it and pass the ' +
+            'descriptor in WASMHUB_LISTEN_FD (as `wasmtime run --tcplisten` does)',
+        )];
+    }
+    const fd = parseInt(raw, 10);
+    if (!Number.isInteger(fd) || fd < 0) {
+        return [null, null, sockError('EINVAL', 'listen', `WASMHUB_LISTEN_FD is not a descriptor: '${raw}'`)];
+    }
+    if (_listenerClaimed) {
+        return [null, null, sockError('EADDRINUSE', 'listen', 'the listening socket is already in use by another server')];
+    }
+    // Advisory: a host that refuses the flag leaves a usable listener, it just
+    // means accept() blocks until a connection arrives.
+    os.sockNonblocking(fd);
+    _listenerClaimed = true;
+    return [fd, parseListenAddr(env.WASMHUB_LISTEN_ADDR, port), null];
+}
+
+class Server extends EventEmitter {
+    constructor(options, connectionListener) {
+        super();
+        if (typeof options === 'function') {
+            connectionListener = options;
+            options = {};
+        }
+        this._options = options || {};
+        this._fd = -1;
+        this._addr = null;
+        this._closing = false;
+        this._connections = new Set();
+        this.listening = false;
+        this.maxConnections = null;
+        if (connectionListener) this.on('connection', connectionListener);
+    }
+
+    // listen(port[, host][, backlog][, callback]) and listen(options[, callback]).
+    // The port and host are advisory: the host bound the socket before this
+    // runtime started, so they are only used to describe the result.
+    listen(...args) {
+        let callback = null;
+        let port = null;
+        for (const arg of args) {
+            if (typeof arg === 'function') callback = arg;
+            else if (typeof arg === 'number' && port === null) port = arg;
+            else if (arg && typeof arg === 'object' && typeof arg.port === 'number') port = arg.port;
+        }
+        if (callback) this.once('listening', callback);
+
+        if (this.listening) {
+            process.nextTick(() => this.emit('error', sockError('ERR_SERVER_ALREADY_LISTEN', 'listen')));
+            return this;
+        }
+
+        const [fd, addr, err] = acquireListener(port);
+        if (err) {
+            process.nextTick(() => this.emit('error', err));
+            return this;
+        }
+
+        this._fd = fd;
+        this._addr = addr;
+        this.listening = true;
+        _sockPoll.listeners.add(this);
+        pollSchedule();
+        process.nextTick(() => this.emit('listening'));
+        return this;
+    }
+
+    _acceptPending() {
+        if (!this.listening || this._closing) return 0;
+        let accepted = 0;
+        // Bounded per tick, so a connection burst cannot hold the loop.
+        while (accepted < 8) {
+            const [fd, err] = os.sockAccept(this._fd);
+            if (err === 'EAGAIN') break;
+            if (err) {
+                this.emit('error', sockError(err, 'accept'));
+                break;
+            }
+            accepted++;
+            const socket = new Socket({ allowHalfOpen: !!this._options.allowHalfOpen });
+            socket._adopt(fd, this);
+            this._connections.add(socket);
+            if (this.maxConnections !== null && this._connections.size > this.maxConnections) {
+                socket.destroy();
+                continue;
+            }
+            this.emit('connection', socket);
+        }
+        return accepted;
+    }
+
+    address() {
+        return this.listening ? this._addr : null;
+    }
+
+    getConnections(callback) {
+        const n = this._connections.size;
+        process.nextTick(() => callback(null, n));
+        return this;
+    }
+
+    close(callback) {
+        if (callback) this.once('close', callback);
+        if (!this.listening) {
+            process.nextTick(() => this.emit('error', sockError('ERR_SERVER_NOT_RUNNING', 'close')));
+            return this;
+        }
+        // Stops accepting immediately; connections already open are left to
+        // finish, which is what Node's close() means.
+        this._closing = true;
+        this.listening = false;
+        if (this._fd >= 0) {
+            os.sockClose(this._fd);
+            this._fd = -1;
+        }
+        _sockPoll.listeners.delete(this);
+        _listenerClaimed = false;
+        this._maybeClosed();
+        return this;
+    }
+
+    _connectionClosed(socket) {
+        this._connections.delete(socket);
+        this._maybeClosed();
+    }
+
+    _maybeClosed() {
+        if (this._closing && this._connections.size === 0) {
+            this._closing = false;
+            process.nextTick(() => this.emit('close'));
+        }
+    }
+
+    ref() { return this; }
+    unref() { return this; }
+}
+
+function isIPv4(s) {
+    if (typeof s !== 'string') return false;
+    const parts = s.split('.');
+    if (parts.length !== 4) return false;
+    return parts.every(p => /^\d{1,3}$/.test(p) && (p === '0' || p[0] !== '0') && Number(p) <= 255);
+}
+
+function isIPv6(s) {
+    if (typeof s !== 'string' || s.indexOf(':') < 0) return false;
+    const compressed = s.split('::');
+    if (compressed.length > 2) return false;
+    const groups = [];
+    for (const half of compressed) {
+        if (half === '') continue;
+        for (const g of half.split(':')) {
+            if (g === '') return false;
+            if (isIPv4(g)) { groups.push('x', 'x'); continue; }
+            if (!/^[0-9a-fA-F]{1,4}$/.test(g)) return false;
+            groups.push(g);
+        }
+    }
+    return compressed.length === 2 ? groups.length < 8 : groups.length === 8;
+}
+
+const netModule = {
+    Server,
+    Socket,
+    Stream: Socket,
+    createServer(options, connectionListener) { return new Server(options, connectionListener); },
+    connect() { throw outboundUnsupported('net.connect'); },
+    createConnection() { throw outboundUnsupported('net.createConnection'); },
+    isIP(s) { return isIPv4(s) ? 4 : isIPv6(s) ? 6 : 0; },
+    isIPv4,
+    isIPv6,
+};
+
+// ═══ http (server half, over net) ═════════════════════════════════════════════
+// createServer and the request/response cycle, built on the `net` server above.
+// The client half (request/get) needs an outbound connect that Preview 1 cannot
+// express, so it reports that rather than pretending.
+
+const STATUS_CODES = {
+    100: 'Continue', 101: 'Switching Protocols', 102: 'Processing', 103: 'Early Hints',
+    200: 'OK', 201: 'Created', 202: 'Accepted', 203: 'Non-Authoritative Information',
+    204: 'No Content', 205: 'Reset Content', 206: 'Partial Content',
+    300: 'Multiple Choices', 301: 'Moved Permanently', 302: 'Found', 303: 'See Other',
+    304: 'Not Modified', 307: 'Temporary Redirect', 308: 'Permanent Redirect',
+    400: 'Bad Request', 401: 'Unauthorized', 402: 'Payment Required', 403: 'Forbidden',
+    404: 'Not Found', 405: 'Method Not Allowed', 406: 'Not Acceptable',
+    408: 'Request Timeout', 409: 'Conflict', 410: 'Gone', 411: 'Length Required',
+    412: 'Precondition Failed', 413: 'Payload Too Large', 414: 'URI Too Long',
+    415: 'Unsupported Media Type', 416: 'Range Not Satisfiable', 417: 'Expectation Failed',
+    418: "I'm a Teapot", 421: 'Misdirected Request', 422: 'Unprocessable Entity',
+    426: 'Upgrade Required', 428: 'Precondition Required', 429: 'Too Many Requests',
+    431: 'Request Header Fields Too Large', 451: 'Unavailable For Legal Reasons',
+    500: 'Internal Server Error', 501: 'Not Implemented', 502: 'Bad Gateway',
+    503: 'Service Unavailable', 504: 'Gateway Timeout', 505: 'HTTP Version Not Supported',
+    507: 'Insufficient Storage', 508: 'Loop Detected', 511: 'Network Authentication Required',
+};
+
+const METHODS = [
+    'CONNECT', 'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT', 'TRACE',
+];
+
+// A request whose head never ends would otherwise buffer without limit.
+const MAX_HEADER_BYTES = 65536;
+
+class IncomingMessage extends Readable {
+    constructor(socket) {
+        super();
+        this.socket = socket;
+        this.connection = socket;
+        this.httpVersion = '1.1';
+        this.httpVersionMajor = 1;
+        this.httpVersionMinor = 1;
+        this.method = null;
+        this.url = null;
+        this.statusCode = null;
+        this.statusMessage = null;
+        this.headers = Object.create(null);
+        this.rawHeaders = [];
+        this.trailers = Object.create(null);
+        this.complete = false;
+    }
+    setTimeout(ms, callback) {
+        if (callback) this.once('timeout', callback);
+        return this;
+    }
+}
+
+class ServerResponse extends Writable {
+    constructor(socket, req) {
+        super();
+        this.socket = socket;
+        this.connection = socket;
+        this.statusCode = 200;
+        this.statusMessage = undefined;
+        this.headersSent = false;
+        this.sendDate = true;
+        this._req = req;
+        // Insertion-ordered, keyed by lowercase name so a later setHeader with
+        // different casing replaces rather than duplicates.
+        this._headerMap = new Map();
+        this._chunked = false;
+        this._keepAlive = false;
+        this._bodyless = false;
+    }
+
+    setHeader(name, value) {
+        if (this.headersSent) {
+            const e = new Error('Cannot set headers after they are sent to the client');
+            e.code = 'ERR_HTTP_HEADERS_SENT';
+            throw e;
+        }
+        this._headerMap.set(String(name).toLowerCase(), [String(name), value]);
+        return this;
+    }
+    getHeader(name) {
+        const entry = this._headerMap.get(String(name).toLowerCase());
+        return entry ? entry[1] : undefined;
+    }
+    getHeaders() {
+        const out = Object.create(null);
+        for (const [key, entry] of this._headerMap) out[key] = entry[1];
+        return out;
+    }
+    getHeaderNames() { return Array.from(this._headerMap.keys()); }
+    hasHeader(name) { return this._headerMap.has(String(name).toLowerCase()); }
+    removeHeader(name) { this._headerMap.delete(String(name).toLowerCase()); return this; }
+
+    writeHead(statusCode, statusMessage, headers) {
+        if (typeof statusMessage === 'object' && statusMessage !== null) {
+            headers = statusMessage;
+            statusMessage = undefined;
+        }
+        this.statusCode = statusCode;
+        if (statusMessage !== undefined) this.statusMessage = statusMessage;
+        if (headers) {
+            if (Array.isArray(headers)) {
+                for (let i = 0; i + 1 < headers.length; i += 2) this.setHeader(headers[i], headers[i + 1]);
+            } else {
+                for (const key of Object.keys(headers)) this.setHeader(key, headers[key]);
+            }
+        }
+        return this;
+    }
+
+    // Decides the framing as late as possible, so a handler that sets
+    // Content-Length after the first setHeader still gets an identity body.
+    _sendHeaders() {
+        if (this.headersSent) return;
+        // Set last: the headers this decides on are written straight into the
+        // map, because setHeader refuses to run once the flag is up.
+        const req = this._req;
+        const version = req ? req.httpVersion : '1.1';
+        const hasLength = this._headerMap.has('content-length');
+        // A HEAD reply and the bodyless status codes carry their headers and
+        // stop there, Content-Length included: it describes the body the same
+        // GET would have returned.
+        const bodyless = this.statusCode === 204 || this.statusCode === 304 ||
+            (this.statusCode >= 100 && this.statusCode < 200) ||
+            (req && req.method === 'HEAD');
+        this._bodyless = bodyless;
+
+        // Chunked is the only way to delimit a body of unknown length on 1.1;
+        // on 1.0 the only way is to close the connection when it ends.
+        this._chunked = !hasLength && !bodyless && version === '1.1';
+
+        const requested = req ? String(req.headers.connection || '').toLowerCase() : '';
+        const selfDelimiting = hasLength || bodyless || this._chunked;
+        this._keepAlive = selfDelimiting && version === '1.1' && requested !== 'close';
+
+        if (this.sendDate && !this._headerMap.has('date')) {
+            this._headerMap.set('date', ['Date', new Date().toUTCString()]);
+        }
+        if (this._chunked) {
+            this._headerMap.set('transfer-encoding', ['Transfer-Encoding', 'chunked']);
+        }
+        this._headerMap.set('connection',
+            ['Connection', this._keepAlive ? 'keep-alive' : 'close']);
+
+        this.headersSent = true;
+
+        const message = this.statusMessage !== undefined
+            ? this.statusMessage
+            : (STATUS_CODES[this.statusCode] || 'unknown');
+
+        let head = `HTTP/1.1 ${this.statusCode} ${message}\r\n`;
+        for (const [, [name, value]] of this._headerMap) {
+            if (Array.isArray(value)) {
+                for (const v of value) head += `${name}: ${v}\r\n`;
+            } else {
+                head += `${name}: ${value}\r\n`;
+            }
+        }
+        head += '\r\n';
+        this.socket.write(Buffer.from(head, 'latin1'));
+    }
+
+    _write(chunk, encoding, callback) {
+        this._sendHeaders();
+        if (this._bodyless) { callback(); return; }
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+        if (buf.length === 0) { callback(); return; }
+        if (this._chunked) {
+            this.socket.write(Buffer.from(`${buf.length.toString(16)}\r\n`, 'latin1'));
+            this.socket.write(buf);
+            this.socket.write(Buffer.from('\r\n', 'latin1'));
+        } else {
+            this.socket.write(buf);
+        }
+        callback();
+    }
+
+    _final(callback) {
+        this._sendHeaders();
+        if (this._chunked) this.socket.write(Buffer.from('0\r\n\r\n', 'latin1'));
+        callback();
+    }
+}
+
+// Splits a header block into a parsed request. Returns null when the start line
+// is malformed, which the caller answers with 400.
+function parseRequestHead(text, socket) {
+    const lines = text.split('\r\n');
+    const start = /^([A-Za-z-]+) (\S+) HTTP\/(\d)\.(\d)$/.exec(lines[0] || '');
+    if (!start) return null;
+
+    const req = new IncomingMessage(socket);
+    req.method = start[1].toUpperCase();
+    req.url = start[2];
+    req.httpVersionMajor = parseInt(start[3], 10);
+    req.httpVersionMinor = parseInt(start[4], 10);
+    req.httpVersion = `${req.httpVersionMajor}.${req.httpVersionMinor}`;
+
+    for (let i = 1; i < lines.length; i++) {
+        const line = lines[i];
+        if (!line) continue;
+        const colon = line.indexOf(':');
+        if (colon <= 0) return null;
+        const name = line.slice(0, colon).trim();
+        const value = line.slice(colon + 1).trim();
+        const key = name.toLowerCase();
+        req.rawHeaders.push(name, value);
+        // Node joins repeats with ", ", except set-cookie which stays a list.
+        if (key === 'set-cookie') {
+            (req.headers[key] || (req.headers[key] = [])).push(value);
+        } else if (req.headers[key] !== undefined) {
+            req.headers[key] = `${req.headers[key]}, ${value}`;
+        } else {
+            req.headers[key] = value;
+        }
+    }
+    return req;
+}
+
+// Drives one connection: parses requests off the byte stream, emits them, and
+// decides whether the socket is reused or closed once each response finishes.
+//
+// Only one exchange is in flight at a time. Bytes for a pipelined request stay
+// in `pending` until the current response has finished, so a handler can never
+// see two requests interleaved on one socket.
+function attachHttpConnection(server, socket) {
+    let pending = Buffer.alloc(0);
+    let request = null;       // message currently being received, null between exchanges
+    let response = null;
+    let bodyDone = true;      // is the current request body fully received
+    let mode = 'none';        // 'none' | 'length' | 'chunked'
+    let remaining = 0;        // identity body bytes still expected
+    let chunkNeed = -1;       // bytes left in the current chunk, -1 while at a size line
+    let waiting = false;      // response outstanding: stop parsing until it finishes
+    let closing = false;
+
+    function fail(status, reason) {
+        closing = true;
+        const body = `${status} ${STATUS_CODES[status] || 'Error'}${reason ? `: ${reason}` : ''}\n`;
+        socket.write(Buffer.from(
+            `HTTP/1.1 ${status} ${STATUS_CODES[status] || 'Error'}\r\n` +
+            'Content-Type: text/plain\r\n' +
+            `Content-Length: ${Buffer.byteLength(body)}\r\n` +
+            'Connection: close\r\n\r\n' + body,
+            'latin1',
+        ));
+        socket.end();
+    }
+
+    function endRequestBody() {
+        if (bodyDone) return;
+        bodyDone = true;
+        if (request) {
+            request.complete = true;
+            request.push(null);
+        }
+    }
+
+    function onResponseFinished(res) {
+        // A response that could not delimit itself can only end by closing.
+        const reuse = res._keepAlive && !closing;
+        endRequestBody();
+        request = null;
+        response = null;
+        waiting = false;
+        if (!reuse) {
+            socket.end();
+            return;
+        }
+        parse();
+    }
+
+    function startExchange() {
+        const end = pending.indexOf('\r\n\r\n');
+        if (end < 0) {
+            if (pending.length > MAX_HEADER_BYTES) fail(431, 'header block too large');
+            return false;
+        }
+        const head = pending.toString('latin1', 0, end);
+        pending = pending.subarray(end + 4);
+
+        const req = parseRequestHead(head, socket);
+        if (!req) { fail(400, 'malformed request line'); return false; }
+
+        const te = String(req.headers['transfer-encoding'] || '').toLowerCase();
+        if (te.split(',').map(s => s.trim()).includes('chunked')) {
+            mode = 'chunked';
+            chunkNeed = -1;
+        } else {
+            const len = parseInt(req.headers['content-length'] || '0', 10);
+            remaining = Number.isFinite(len) && len > 0 ? len : 0;
+            mode = remaining > 0 ? 'length' : 'none';
+        }
+
+        request = req;
+        response = new ServerResponse(socket, req);
+        bodyDone = mode === 'none';
+        waiting = true;
+
+        const res = response;
+        res.once('finish', () => onResponseFinished(res));
+
+        if (bodyDone) {
+            req.complete = true;
+            // Deferred so a handler that reads the body still sees 'end' after
+            // its own listeners are attached.
+            process.nextTick(() => req.push(null));
+        }
+        server.emit('request', req, res);
+        return true;
+    }
+
+    // Returns false when it needs more bytes.
+    function readChunked() {
+        for (;;) {
+            if (chunkNeed < 0) {
+                const eol = pending.indexOf('\r\n');
+                if (eol < 0) return false;
+                const sizeLine = pending.toString('latin1', 0, eol).split(';')[0].trim();
+                const size = parseInt(sizeLine, 16);
+                if (!Number.isFinite(size) || size < 0) { fail(400, 'malformed chunk size'); return false; }
+                pending = pending.subarray(eol + 2);
+                if (size === 0) {
+                    // Trailer section, terminated by a blank line.
+                    const end = pending.indexOf('\r\n');
+                    if (end < 0) return false;
+                    pending = pending.subarray(end + 2);
+                    endRequestBody();
+                    return true;
+                }
+                chunkNeed = size;
+            }
+            if (pending.length < chunkNeed + 2) return false;
+            request.push(Buffer.from(pending.subarray(0, chunkNeed)));
+            pending = pending.subarray(chunkNeed + 2);  // skip the chunk's trailing CRLF
+            chunkNeed = -1;
+        }
+    }
+
+    function parse() {
+        for (;;) {
+            if (closing) return;
+
+            if (request === null) {
+                if (waiting) return;
+                if (!startExchange()) return;
+                continue;
+            }
+
+            if (bodyDone) return;   // body in hand, waiting on the handler's response
+
+            if (mode === 'chunked') {
+                if (!readChunked()) return;
+                continue;
+            }
+
+            if (pending.length === 0) return;
+            const take = Math.min(remaining, pending.length);
+            request.push(Buffer.from(pending.subarray(0, take)));
+            pending = pending.subarray(take);
+            remaining -= take;
+            if (remaining === 0) endRequestBody();
+        }
+    }
+
+    socket.on('data', (chunk) => {
+        pending = pending.length === 0 ? chunk : Buffer.concat([pending, chunk]);
+        parse();
+    });
+
+    socket.on('error', (err) => {
+        closing = true;
+        if (request && !bodyDone) request.emit('aborted');
+        server.emit('clientError', err, socket);
+    });
+
+    socket.on('end', () => {
+        closing = true;
+        endRequestBody();
+    });
+}
+
+class HttpServer extends Server {
+    constructor(options, requestListener) {
+        if (typeof options === 'function') {
+            requestListener = options;
+            options = {};
+        }
+        super(options);
+        if (requestListener) this.on('request', requestListener);
+        this.on('connection', (socket) => attachHttpConnection(this, socket));
+    }
+}
+
+const httpModule = {
+    STATUS_CODES,
+    METHODS,
+    Server: HttpServer,
+    IncomingMessage,
+    ServerResponse,
+    createServer(options, requestListener) { return new HttpServer(options, requestListener); },
+    request() { throw outboundUnsupported('http.request'); },
+    get() { throw outboundUnsupported('http.get'); },
+    Agent: class Agent {
+        constructor() { throw outboundUnsupported('http.Agent'); }
+    },
+    globalAgent: null,
+};
+
 // ═══ Modules the sandbox cannot provide ═══════════════════════════════════════
 // Present but throwing, deliberately: absent, they fail at require() time with
 // "Cannot find module", which reads as a broken runtime. This way a package
 // that merely imports one keeps working.
+
+const SOCKETS_MISSING =
+    'this build has no socket bindings, or the host passed no listening ' +
+    'descriptor. WASI Preview 1 cannot bind a port from inside the sandbox';
 
 function unsupportedModule(moduleName, reason, members) {
     const mod = {};
@@ -2922,6 +3808,33 @@ const builtins = {
     'worker_threads': workerThreads,
     'child_process': childProcess,
     'tty': tty,
+    // Both are real modules when the engine has the socket bindings and the
+    // same throwing shape as zlib when it does not, so a package that merely
+    // requires one keeps loading either way.
+    'net': HAS_SOCKETS ? netModule : unsupportedModule(
+        'net', SOCKETS_MISSING,
+        ['createServer', 'connect', 'createConnection', 'Server', 'Socket'],
+    ),
+    'http': HAS_SOCKETS ? httpModule : unsupportedModule(
+        'http', SOCKETS_MISSING,
+        ['createServer', 'request', 'get', 'Server'],
+    ),
+    'https': unsupportedModule(
+        'https',
+        'no TLS library is linked into the runtime, and Preview 1 cannot open ' +
+        'an outbound connection for the host to terminate TLS on',
+        ['createServer', 'request', 'get', 'Server'],
+    ),
+    'dgram': unsupportedModule(
+        'dgram',
+        'WASI Preview 1 has no datagram socket calls',
+        ['createSocket'],
+    ),
+    'tls': unsupportedModule(
+        'tls',
+        'no TLS library is linked into the runtime',
+        ['connect', 'createServer', 'createSecureContext'],
+    ),
 };
 
 // `require('process')` must hand back the same object as the global, which
@@ -3466,9 +4379,10 @@ function printVersion() {
     std.out.puts(`Node.js compat: v${NODE_COMPAT_VERSION}.x\n`);
     std.out.puts(`Engine: ${ENGINE}\n`);
     std.out.puts(`Target: WASI Preview 1\n`);
-    std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, stdin, timers, async, buffer, exports-map resolution\n`);
-    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises, process, tty, node:test (and node:* aliases)\n`);
-    std.out.puts(`Stubbed: zlib, worker_threads, child_process (present, throw a clear error when used)\n`);
+    std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, stdin, timers, async, buffer, exports-map resolution, inbound sockets\n`);
+    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises, process, tty, net, http, node:test (and node:* aliases)\n`);
+    std.out.puts(`Networking: ${HAS_SOCKETS ? 'net/http servers over a host-provided listening socket (WASMHUB_LISTEN_FD)' : 'unavailable in this build'}; outbound connect is not supported on WASI Preview 1\n`);
+    std.out.puts(`Stubbed: zlib, worker_threads, child_process, https, dgram, tls (present, throw a clear error when used)\n`);
     std.out.puts(`Globals: Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone\n`);
     std.out.flush();
 }

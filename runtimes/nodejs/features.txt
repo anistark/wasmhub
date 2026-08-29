@@ -42,3 +42,11 @@ stdin
 node-test
 exports-map
 named-stack-frames
+
+# Inbound only: Preview 1 can accept, read and write a socket handed in by the
+# host, but cannot open one, so the client halves report themselves unsupported.
+net-server
+http-server
+https-stub
+dgram-stub
+tls-stub

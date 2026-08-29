@@ -95,6 +95,10 @@ const std = {
 };
 
 const os = {
+    // The runtime's timers and its socket poll loop both need a real timer;
+    // node's is close enough to QuickJS's os.setTimeout for both.
+    setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+    clearTimeout: (id) => globalThis.clearTimeout(id),
     getcwd: () => [__h.cwd, 0],
     stat: (p) => {
         const e = __entry(p);
@@ -105,6 +109,19 @@ const os = {
         }, 0];
     },
 };
+
+// Defined only when a test supplies a backend, so that HAS_SOCKETS is false
+// otherwise and the degraded net/http path is exercised as it would be on a
+// host with no socket layer at all.
+if (__h.sockets) {
+    os.sockAccept = (fd) => __h.sockets.accept(fd);
+    os.sockRecv = (fd, ab, off, len) => __h.sockets.recv(fd, ab, off, len);
+    os.sockSend = (fd, ab, off, len) => __h.sockets.send(fd, ab, off, len);
+    os.sockShutdown = (fd, how) => __h.sockets.shutdown(fd, how);
+    os.sockClose = (fd) => __h.sockets.close(fd);
+    os.sockNonblocking = (fd) => __h.sockets.nonblocking(fd);
+}
+
 const scriptArgs = [];
 `;
 
@@ -132,6 +149,10 @@ export {
     makeStdinStream,
     nodeTest,
     setupGlobals,
+    netModule,
+    httpModule,
+    HAS_SOCKETS,
+    STATUS_CODES,
 };
 `;
 
@@ -141,6 +162,8 @@ let seq = 0;
 ///
 /// `files` maps absolute paths to file contents; any path with children is
 /// treated as a directory. `stdin` is a string or Buffer served on fd 0.
+/// `sockets` is a backend for the os.sock* bindings (see ./fakenet.mjs);
+/// leaving it out is what a host with no socket layer looks like.
 export async function loadRuntime(options = {}) {
     return (await loadRuntimeWithState(options)).runtime;
 }
@@ -157,6 +180,7 @@ export async function loadRuntimeWithState(options = {}) {
         cwd: options.cwd || '/',
         stdin: Buffer.from(options.stdin || ''),
         stdinPos: 0,
+        sockets: options.sockets || null,
         exitCode: null,
     };
 

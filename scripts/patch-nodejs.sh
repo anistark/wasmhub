@@ -145,6 +145,68 @@ open(path, "w").write(content)
 PYEOF
     fi
 
+    # Expose the WASI Preview 1 socket calls to JS as os.sock*, which is what
+    # main.js builds the `net` and `http` server halves on. The bindings
+    # themselves live in runtimes/nodejs/wasi_sockets.c; this only registers
+    # them on the `os` module, alongside the functions quickjs-libc ships.
+    if grep -q "wasmhub_sock_funcs" "${SOURCE_DIR}/quickjs-libc.c"; then
+        echo "  [quickjs] socket bindings already registered"
+    else
+        echo "  [quickjs] Registering os.sock* bindings in quickjs-libc.c"
+        python3 - "${SOURCE_DIR}/quickjs-libc.c" <<'SOCKEOF'
+import re
+import sys
+
+path = sys.argv[1]
+content = open(path).read()
+
+# The list is defined in wasi_sockets.c, compiled and linked alongside, so an
+# extern declaration is all quickjs-libc needs in order to export it.
+decl = """
+/* wasmhub: host socket bindings (runtimes/nodejs/wasi_sockets.c) */
+extern const JSCFunctionListEntry wasmhub_sock_funcs[];
+extern const int wasmhub_sock_funcs_count;
+
+"""
+
+init_anchor = "static int js_os_init(JSContext *ctx, JSModuleDef *m)"
+if init_anchor not in content:
+    sys.exit("quickjs-libc.c: js_os_init anchor not found")
+content = content.replace(init_anchor, decl + init_anchor, 1)
+
+# A module's exports are declared with JS_AddModuleExportList when the module
+# is created and filled in with JS_SetModuleExportList when it initialises.
+# Both have to know about the extra entries or the names resolve to undefined.
+add_pat = re.compile(
+    r"JS_AddModuleExportList\(ctx,\s*m,\s*js_os_funcs,\s*countof\(js_os_funcs\)\);"
+)
+if not add_pat.search(content):
+    sys.exit("quickjs-libc.c: JS_AddModuleExportList(js_os_funcs) not found")
+content = add_pat.sub(
+    lambda m: m.group(0)
+    + "\n    JS_AddModuleExportList(ctx, m, wasmhub_sock_funcs, wasmhub_sock_funcs_count);",
+    content,
+    count=1,
+)
+
+set_pat = re.compile(
+    r"return\s+JS_SetModuleExportList\(ctx,\s*m,\s*js_os_funcs,\s*countof\(js_os_funcs\)\);"
+)
+if not set_pat.search(content):
+    sys.exit("quickjs-libc.c: JS_SetModuleExportList(js_os_funcs) not found")
+content = set_pat.sub(
+    "if (JS_SetModuleExportList(ctx, m, js_os_funcs, countof(js_os_funcs)))\n"
+    "        return -1;\n"
+    "    return JS_SetModuleExportList(ctx, m, wasmhub_sock_funcs,\n"
+    "                                  wasmhub_sock_funcs_count);",
+    content,
+    count=1,
+)
+
+open(path, "w").write(content)
+SOCKEOF
+    fi
+
     echo "  [quickjs] Patches applied"
     exit 0
 fi

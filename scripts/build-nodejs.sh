@@ -156,6 +156,13 @@ echo "  Compiling WASI link-time stubs..."
 "${CLANG}" "${WASM_CFLAGS[@]}" -c "${RUNTIMES_DIR}/wasi_stubs.c" -o "${BUILD_DIR}/wasi_stubs.o"
 WASM_OBJS+=("${BUILD_DIR}/wasi_stubs.o")
 
+# The socket bindings behind os.sock*, which main.js turns into `net` and
+# `http`. Preview 1 standard calls only (sock_accept/recv/send/shutdown), so
+# this adds no import a stock WASI host does not already provide.
+echo "  Compiling WASI socket bindings..."
+"${CLANG}" "${WASM_CFLAGS[@]}" -c "${RUNTIMES_DIR}/wasi_sockets.c" -o "${BUILD_DIR}/wasi_sockets.o"
+WASM_OBJS+=("${BUILD_DIR}/wasi_sockets.o")
+
 # ── Link ──────────────────────────────────────────────────────────────────────
 
 echo "Linking WASM binary..."

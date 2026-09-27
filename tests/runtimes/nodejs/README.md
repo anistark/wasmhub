@@ -20,6 +20,7 @@ fixtures/
   testrunner.js       # the node:test runner: TAP output and exit code
   resolver.js         # package.json "exports": conditions, subpaths, encapsulation
   httpserver.js       # inbound networking: a real listening socket from the host
+  lifecycle.js        # console, uncaught errors, unhandled rejections, exit codes
   node_modules/
     greet/
       package.json    # main: src/greet.js
@@ -29,7 +30,25 @@ fixtures/
       lib/            # main.cjs / main.mjs / sub.js / feature/one.js / private.js
 ```
 
-## Running
+## Running all of them
+
+```sh
+just test-nodejs-wasm                          # runtimes/nodejs/nodejs-20.wasm
+just test-nodejs-wasm path/to/nodejs-20.wasm   # any other build
+```
+
+`run-fixtures.sh` runs every fixture below under `wasmtime`, including the
+failing cases (a mismatched stdin, a failing `node:test` run, each
+`lifecycle.js` scenario that should exit non-zero), and drives
+`httpserver.js` with `curl`. It checks each one's exit code as well as its
+output, because the exit code is the part the node harness cannot see: the
+v0.5.0 runtime had no `console.error`, and its failed runs exited 0. CI runs
+it on every runtime build (`build-runtimes.yml`) and on the release binary
+before any asset is staged (`release.yml`), with wasmtime pinned to 46.0.1 and
+`WASMHUB_REQUIRE_HTTP=1`, so the `httpserver.js` check cannot quietly turn into
+a skip.
+
+## Running one
 
 ```sh
 wasmrun exec \
@@ -196,7 +215,10 @@ a surprise inside somebody's sandbox. This runs in `just ci`.
 
 The harness serves an in-memory filesystem and a stdin buffer, so the module
 resolver (`resolver.test.mjs`), standard input (`stdin.test.mjs`) and the
-`node:test` runner (`nodetest.test.mjs`) are covered here too.
+`node:test` runner (`nodetest.test.mjs`) are covered here too. It records what
+the runtime writes to `std.err`, so `lifecycle.test.mjs` can assert on the
+console and on what an uncaught error or an unhandled rejection reports; the
+engine hooks that call into that code are covered by `fixtures/lifecycle.js`.
 
 `fakenet.mjs` adds an in-memory stand-in for the host's socket layer, which is
 what lets `net.test.mjs` and `http.test.mjs` cover the server path here rather
@@ -207,8 +229,8 @@ nothing to read yet is `EAGAIN`, an orderly peer shutdown is zero bytes. Its
 exercised rather than assumed.
 
 What it cannot cover is the real event loop, real WASI, and the runner's own
-process exit. That is what `fixtures/builtins.js`, `fixtures/stdin.js` and
-`fixtures/testrunner.js` are for, and they need a built runtime:
+process exit. That is what the fixtures are for, and they need a built runtime
+(`just test-nodejs-wasm` runs them all):
 
 ```sh
 wasmrun exec \
@@ -271,15 +293,22 @@ the run must then exit 1, which is how wasmrun surfaces a failed test run.
 ### Inbound networking (`httpserver.js`)
 
 WASI Preview 1 cannot bind a port from inside the sandbox, so the host binds it
-and passes the descriptor in. `wasmtime run --tcplisten` does exactly that:
+and passes the descriptor in. wasmtime's listen-socket option does exactly that
+up to wasmtime 46 (`-S tcplisten` on the legacy Preview 1 implementation, or
+`--tcplisten` before 14). wasmtime 47 removed the legacy implementation, so
+`run-fixtures.sh` skips this check on a newer one, and CI pins 46.0.1:
 
 ```sh
-wasmtime run --tcplisten 127.0.0.1:8080 \
+wasmtime run -S preview2=n -S tcplisten=127.0.0.1:8080 \
   --env WASMHUB_LISTEN_FD=3 --env WASMHUB_LISTEN_ADDR=127.0.0.1:8080 \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/httpserver.js
+  runtimes/nodejs/nodejs-20.wasm \
+  eval "$(cat tests/runtimes/nodejs/fixtures/httpserver.js)"
 ```
+
+`eval`, not `run`: wasmtime puts the socket on fd 3, ahead of any `--dir`, and
+wasi-libc stops looking for preopened directories at the first descriptor that
+is not one, so a `--dir` alongside it is invisible and `run` cannot open the
+file.
 
 Expected output on startup:
 

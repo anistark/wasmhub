@@ -43,6 +43,12 @@ test:
 test-nodejs-builtins:
     node --test "tests/runtimes/nodejs/*.test.mjs"
 
+# Covers the real engine, event loop, console and exit codes, which the node
+# harness cannot reach. Run it on the rebuilt runtime before every release.
+# Run the nodejs fixtures against a built wasm under wasmtime
+test-nodejs-wasm wasm="runtimes/nodejs/nodejs-20.wasm":
+    ./tests/runtimes/nodejs/run-fixtures.sh "{{wasm}}"
+
 # Run tests with output
 test-verbose:
     cargo test --all-features -- --nocapture

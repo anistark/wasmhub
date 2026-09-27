@@ -83,6 +83,12 @@ const std = {
     evalScript(src, options) {
         return globalThis.__wasmhubVm.runInThisContext(src, { filename: (options && options.filename) || '<evalScript>' });
     },
+    // Recorded rather than printed, so a test can assert on what the runtime
+    // reported for an uncaught error or an unhandled rejection.
+    err: {
+        puts(s) { __h.stderr += s; },
+        flush() {},
+    },
     in: {
         read(buffer, offset, length) {
             const n = Math.min(length, __h.stdin.length - __h.stdinPos);
@@ -94,11 +100,16 @@ const std = {
     },
 };
 
+// Captured now, while they are still node's: setupGlobals replaces the globals
+// with the runtime's own wrappers, which call back into os.setTimeout.
+const __nodeSetTimeout = globalThis.setTimeout;
+const __nodeClearTimeout = globalThis.clearTimeout;
+
 const os = {
     // The runtime's timers and its socket poll loop both need a real timer;
     // node's is close enough to QuickJS's os.setTimeout for both.
-    setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
-    clearTimeout: (id) => globalThis.clearTimeout(id),
+    setTimeout: (fn, ms) => __nodeSetTimeout(fn, ms),
+    clearTimeout: (id) => __nodeClearTimeout(id),
     getcwd: () => [__h.cwd, 0],
     stat: (p) => {
         const e = __entry(p);
@@ -153,6 +164,14 @@ export {
     httpModule,
     HAS_SOCKETS,
     STATUS_CODES,
+    Console,
+    nodeConsole,
+    inspect,
+    formatEvalResult,
+    _fatalException,
+    _onRejection,
+    _processRejections,
+    _onLoopDrained,
 };
 `;
 
@@ -170,7 +189,7 @@ export async function loadRuntime(options = {}) {
 
 /// Load main.js and return both its namespace and the harness state backing
 /// the shims, for tests that need to read what the runtime did to it —
-/// `state.exitCode` is what std.exit recorded.
+/// `state.exitCode` is what std.exit recorded, `state.stderr` what std.err got.
 export async function loadRuntimeWithState(options = {}) {
     const key = `run${seq++}`;
     globalThis.__wasmhubHarness = globalThis.__wasmhubHarness || {};
@@ -182,6 +201,7 @@ export async function loadRuntimeWithState(options = {}) {
         stdinPos: 0,
         sockets: options.sockets || null,
         exitCode: null,
+        stderr: '',
     };
 
     const source = await readFile(MAIN_JS, 'utf8');
@@ -200,4 +220,41 @@ export async function loadRuntimeWithState(options = {}) {
         runtime: await import(pathToFileURL(file).href),
         state: globalThis.__wasmhubHarness[key],
     };
+}
+
+/// The `std.exit(N)` marker the harness throws, or null if `fn` did not exit.
+export function exitCodeFrom(fn) {
+    try {
+        fn();
+    } catch (e) {
+        if (typeof e.__wasmhubExit === 'number') return e.__wasmhubExit;
+        throw e;
+    }
+    return null;
+}
+
+/// Run `fn` with the runtime's globals installed, then put node's back.
+///
+/// setupGlobals assigns over `crypto`, which node defines as getter-only, so
+/// the property is made writable for the duration and restored afterwards.
+/// `console` is put back too, or the test runner would report through the
+/// runtime's.
+export async function withGlobals(fn) {
+    const { runtime, state } = await loadRuntimeWithState();
+    const cryptoDesc = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+    const processDesc = Object.getOwnPropertyDescriptor(globalThis, 'process');
+    const consoleDesc = Object.getOwnPropertyDescriptor(globalThis, 'console');
+    Object.defineProperty(globalThis, 'crypto', {
+        value: cryptoDesc.get ? cryptoDesc.get.call(globalThis) : cryptoDesc.value,
+        writable: true,
+        configurable: true,
+    });
+    try {
+        runtime.setupGlobals('/main.js', []);
+        return await fn(globalThis.process, state, runtime);
+    } finally {
+        Object.defineProperty(globalThis, 'crypto', cryptoDesc);
+        Object.defineProperty(globalThis, 'process', processDesc);
+        Object.defineProperty(globalThis, 'console', consoleDesc);
+    }
 }

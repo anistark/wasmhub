@@ -207,6 +207,185 @@ open(path, "w").write(content)
 SOCKEOF
     fi
 
+    # Give main.js the process lifecycle node has. Stock quickjs-libc prints an
+    # exception thrown from a timer and carries on, never tracks promise
+    # rejections at all, and exits 0 once the loop drains whatever happened, so
+    # a crashed program reported success. os.setHostHooks(hooks) installs a
+    # rejection tracker and routes those three points into JS, which decides
+    # what node would: report, emit 'exit', and pick the exit code.
+    if grep -q "wasmhub_host_hook" "${SOURCE_DIR}/quickjs-libc.c"; then
+        echo "  [quickjs] host lifecycle hooks already present"
+    else
+        echo "  [quickjs] Adding os.setHostHooks lifecycle hooks to quickjs-libc.c"
+        python3 - "${SOURCE_DIR}/quickjs-libc.c" <<'HOOKEOF'
+import sys
+
+path = sys.argv[1]
+content = open(path).read()
+
+helpers = r'''
+/* wasmhub: process lifecycle hooks, registered from main.js with
+   os.setHostHooks({ rejection, uncaught, exit }). The object lives on the
+   global rather than in a static: a JSValue still held when the generated
+   main() frees the runtime trips JS_FreeRuntime's leak assertion. */
+#define WASMHUB_HOOKS_PROP "__wasmhubHostHooks"
+
+static JSValue wasmhub_host_hook(JSContext *ctx, const char *name)
+{
+    JSValue global, hooks, fn = JS_UNDEFINED;
+    global = JS_GetGlobalObject(ctx);
+    hooks = JS_GetPropertyStr(ctx, global, WASMHUB_HOOKS_PROP);
+    if (JS_IsObject(hooks))
+        fn = JS_GetPropertyStr(ctx, hooks, name);
+    JS_FreeValue(ctx, hooks);
+    JS_FreeValue(ctx, global);
+    if (JS_IsException(fn)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        return JS_UNDEFINED;
+    }
+    if (!JS_IsFunction(ctx, fn)) {
+        JS_FreeValue(ctx, fn);
+        return JS_UNDEFINED;
+    }
+    return fn;
+}
+
+/* Takes the pending exception. With no hook, prints it as stock does. */
+static void wasmhub_uncaught(JSContext *ctx)
+{
+    JSValue exc, fn, ret;
+    exc = JS_GetException(ctx);
+    fn = wasmhub_host_hook(ctx, "uncaught");
+    if (JS_IsUndefined(fn)) {
+        JS_Throw(ctx, exc);
+        js_std_dump_error(ctx);
+        return;
+    }
+    ret = JS_Call(ctx, fn, JS_UNDEFINED, 1, (JSValueConst *)&exc);
+    if (JS_IsException(ret))
+        js_std_dump_error(ctx);
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, fn);
+    JS_FreeValue(ctx, exc);
+}
+
+static void wasmhub_rejection_tracker(JSContext *ctx, JSValueConst promise,
+                                      JSValueConst reason,
+                                      BOOL is_handled, void *opaque)
+{
+    JSValue fn, ret;
+    JSValueConst args[3];
+    fn = wasmhub_host_hook(ctx, "rejection");
+    if (JS_IsUndefined(fn))
+        return;
+    args[0] = promise;
+    args[1] = reason;
+    args[2] = JS_NewBool(ctx, is_handled);
+    ret = JS_Call(ctx, fn, JS_UNDEFINED, 3, args);
+    if (JS_IsException(ret))
+        js_std_dump_error(ctx);
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, fn);
+}
+
+/* The loop has nothing left to wait on: node's 'exit'. The hook returns the
+   exit code; 0 falls through to the generated main()'s normal teardown. */
+static void wasmhub_loop_drained(JSContext *ctx)
+{
+    JSValue fn, ret;
+    int code = 0;
+    fn = wasmhub_host_hook(ctx, "exit");
+    if (JS_IsUndefined(fn))
+        return;
+    ret = JS_Call(ctx, fn, JS_UNDEFINED, 0, NULL);
+    if (JS_IsException(ret)) {
+        js_std_dump_error(ctx);
+        code = 1;
+    } else if (JS_ToInt32(ctx, &code, ret)) {
+        JS_FreeValue(ctx, JS_GetException(ctx));
+        code = 1;
+    }
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, fn);
+    if (code != 0) {
+        fflush(stdout);
+        fflush(stderr);
+        exit(code);
+    }
+}
+
+static JSValue js_os_setHostHooks(JSContext *ctx, JSValueConst this_val,
+                                  int argc, JSValueConst *argv)
+{
+    JSValue global = JS_GetGlobalObject(ctx);
+    int ret = JS_DefinePropertyValueStr(ctx, global, WASMHUB_HOOKS_PROP,
+                                        JS_DupValue(ctx, argv[0]), 0);
+    JS_FreeValue(ctx, global);
+    if (ret < 0)
+        return JS_EXCEPTION;
+    JS_SetHostPromiseRejectionTracker(JS_GetRuntime(ctx),
+                                      wasmhub_rejection_tracker, NULL);
+    return JS_UNDEFINED;
+}
+
+'''
+
+def replace_once(old, new, what):
+    global content
+    if old not in content:
+        sys.exit("quickjs-libc.c: " + what + " anchor not found")
+    content = content.replace(old, new, 1)
+
+# 1. The helpers, ahead of their first caller.
+replace_once("static void call_handler(JSContext *ctx, JSValueConst func)\n",
+             helpers + "static void call_handler(JSContext *ctx, JSValueConst func)\n",
+             "call_handler")
+
+# 2. A timer or I/O callback that throws.
+replace_once("""    JS_FreeValue(ctx, func1);
+    if (JS_IsException(ret))
+        js_std_dump_error(ctx);
+""", """    JS_FreeValue(ctx, func1);
+    if (JS_IsException(ret))
+        wasmhub_uncaught(ctx);
+""", "call_handler exception")
+
+# 3. A pending job that throws, and the loop draining.
+replace_once("""                if (err < 0) {
+                    js_std_dump_error(ctx1);
+                }
+                break;
+            }
+        }
+
+        if (!os_poll_func || os_poll_func(ctx))
+            break;
+    }
+}
+""", """                if (err < 0) {
+                    wasmhub_uncaught(ctx1);
+                }
+                break;
+            }
+        }
+
+        if (!os_poll_func || os_poll_func(ctx))
+            break;
+    }
+    wasmhub_loop_drained(ctx);
+}
+""", "js_std_loop")
+
+# 4. The binding itself.
+replace_once("static const JSCFunctionListEntry js_os_funcs[] = {",
+             "static const JSCFunctionListEntry js_os_funcs[] = {\n"
+             '    JS_CFUNC_DEF("setHostHooks", 1, js_os_setHostHooks ),',
+             "js_os_funcs")
+
+open(path, "w").write(content)
+HOOKEOF
+    fi
+
     echo "  [quickjs] Patches applied"
     exit 0
 fi

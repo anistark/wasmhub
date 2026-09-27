@@ -43,6 +43,14 @@ node-test
 exports-map
 named-stack-frames
 
+# A node-shaped console (error/warn/table/...) and process lifecycle: process is
+# an EventEmitter, uncaught errors and unhandled rejections exit 1 unless a
+# listener takes them, and a drained loop emits 'exit' with process.exitCode.
+console
+process-events
+unhandled-rejections
+exit-code
+
 # Inbound only: Preview 1 can accept, read and write a socket handed in by the
 # host, but cannot open one, so the client halves report themselves unsupported.
 net-server

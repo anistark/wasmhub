@@ -12,9 +12,9 @@ const crypto = require('node:crypto');
 async function main() {
     // ── fs/promises ───────────────────────────────────────────────────
     const file = path.join('/tmp', 'wasmhub-builtins-fixture.txt');
-    await fsp.writeFile(file, 'hello');
-    assert.strictEqual(await fsp.readFile(file, 'utf8'), 'hello');
-    await fsp.appendFile(file, ' world');
+    // Appending has its own fixture, append.js, since it depends on the host
+    // honouring O_APPEND.
+    await fsp.writeFile(file, 'hello world');
     assert.strictEqual(await fsp.readFile(file, 'utf8'), 'hello world');
 
     const stat = await fsp.stat(file);

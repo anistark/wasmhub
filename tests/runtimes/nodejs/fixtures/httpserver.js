@@ -10,7 +10,8 @@
 //     eval "$(cat tests/runtimes/nodejs/fixtures/httpserver.js)"
 //
 // Through eval because wasmtime puts the socket on fd 3, ahead of any --dir,
-// and wasi-libc stops scanning for preopens there. run-fixtures.sh does this.
+// and wasi-libc stops scanning for preopens there. run-fixtures.mjs does this.
+// Under wasmrun, POST /api/v1/sessions/:id/serve runs it with no such limit.
 //
 // Then, from another shell:
 //   curl -s localhost:8080/hello        -> {"method":"GET","url":"/hello","body":""}

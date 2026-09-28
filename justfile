@@ -44,10 +44,16 @@ test-nodejs-builtins:
     node --test "tests/runtimes/nodejs/*.test.mjs"
 
 # Covers the real engine, event loop, console and exit codes, which the node
-# harness cannot reach. Run it on the rebuilt runtime before every release.
+# harness cannot reach. Run both on the rebuilt runtime before every release.
 # Run the nodejs fixtures against a built wasm under wasmtime
 test-nodejs-wasm wasm="runtimes/nodejs/nodejs-20.wasm":
-    ./tests/runtimes/nodejs/run-fixtures.sh "{{wasm}}"
+    node tests/runtimes/nodejs/run-fixtures.mjs --host wasmtime "{{wasm}}"
+
+# wasmrun is the runtime's real consumer: this serves the build to its agent
+# mode as a wasmhub release and runs each fixture in a session.
+# Run the nodejs fixtures against a built wasm under wasmrun's agent mode
+test-nodejs-wasmrun wasm="runtimes/nodejs/nodejs-20.wasm":
+    node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun "{{wasm}}"
 
 # Run tests with output
 test-verbose:

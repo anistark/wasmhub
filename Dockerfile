@@ -8,7 +8,6 @@ ARG BINARYEN_VERSION=130
 ARG TINYGO_VERSION=0.34.0
 ARG GO_VERSION=1.23.4
 ARG RUST_VERSION=stable
-ARG WASMRUN_VERSION=0.13.0
 ARG QUICKJS_VERSION=2024-01-13
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -93,9 +92,6 @@ RUN rustup toolchain install nightly && \
     rustup component add rust-src --toolchain nightly && \
     rustup target add wasm32-wasip1 --toolchain nightly
 
-# wasmrun: https://github.com/anistark/wasmrun
-RUN cargo install wasmrun --version ${WASMRUN_VERSION}
-
 WORKDIR /workspace
 
 RUN echo "WASI SDK: ${WASI_SDK_VERSION}" && \
@@ -104,7 +100,6 @@ RUN echo "WASI SDK: ${WASI_SDK_VERSION}" && \
     echo "Rust: $(rustc --version)" && \
     echo "Cargo: $(cargo --version)" && \
     echo "Python: $(python3 --version)" && \
-    echo "Wasmrun: $(wasmrun --version 2>/dev/null || echo 'installed')" && \
     echo "wasm32-wasip1 target: $(rustup target list --installed | grep wasm)"
 
 CMD ["/bin/bash"]

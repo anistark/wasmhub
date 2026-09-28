@@ -6,8 +6,6 @@ usage() {
     echo ""
     echo "Options:"
     echo "  --sha256 HASH     Verify SHA256 checksum"
-    echo "  --run             Try to execute the binary"
-    echo "  --args ARGS       Arguments to pass when running"
     echo "  -v, --verbose     Verbose output"
     echo "  -h, --help        Show this help"
     exit 1
@@ -15,15 +13,11 @@ usage() {
 
 WASM_FILE=""
 EXPECTED_SHA256=""
-RUN_BINARY="false"
-RUN_ARGS=""
 VERBOSE="false"
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --sha256) EXPECTED_SHA256="$2"; shift 2 ;;
-        --run) RUN_BINARY="true"; shift ;;
-        --args) RUN_ARGS="$2"; shift 2 ;;
         -v|--verbose) VERBOSE="true"; shift ;;
         -h|--help) usage ;;
         -*) echo "Unknown option: $1"; usage ;;
@@ -86,22 +80,6 @@ if [[ -n "${EXPECTED_SHA256}" ]]; then
 else
     SHA256=$(shasum -a 256 "${WASM_FILE}" | cut -d' ' -f1)
     echo "✓ SHA256: ${SHA256}"
-fi
-
-if [[ "${RUN_BINARY}" == "true" ]]; then
-    if command -v wasmrun &> /dev/null; then
-        echo ""
-        echo "Executing binary with wasmrun..."
-        echo "---"
-        if [[ -n "${RUN_ARGS}" ]]; then
-            wasmrun "${WASM_FILE}" ${RUN_ARGS}
-        else
-            timeout 5 wasmrun "${WASM_FILE}" 2>/dev/null || echo "(execution skipped)"
-        fi
-        echo "---"
-    else
-        echo "- wasmrun not found, skipping runtime execution"
-    fi
 fi
 
 echo ""

@@ -66,7 +66,8 @@ The checks are one table run under either of two hosts:
 A check that fails on one host for a reason outside this runtime carries a
 `knownFailure` for that host and is reported as `xfail`; if it starts passing,
 the run fails, so the marker goes when the bug does. Today that is `append` on
-wasmrun, whose `path_open` ignores the append flag.
+wasmrun, whose `path_open` ignores the append flag
+([anistark/wasmrun#123](https://github.com/anistark/wasmrun/issues/123)).
 
 CI runs both hosts on every runtime build (`build-runtimes.yml`) and on the
 release binary before any asset is staged (`release.yml`), with wasmtime pinned

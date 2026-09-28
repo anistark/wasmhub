@@ -61,7 +61,7 @@ const CHECKS = [
         code: 0,
         text: 'append=pass',
         knownFailure: {
-            wasmrun: "wasmrun's path_open ignores fdflags, so O_APPEND is dropped and an append overwrites from offset 0",
+            wasmrun: "wasmrun's path_open ignores fdflags, so O_APPEND is dropped and an append overwrites from offset 0 (anistark/wasmrun#123)",
         },
     },
     { name: 'resolver', file: 'resolver.js', code: 0, text: 'resolver=pass' },

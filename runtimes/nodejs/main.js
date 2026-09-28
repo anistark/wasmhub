@@ -848,10 +848,10 @@ function _inspect(v, depth, seen) {
     if (t === "bigint") return String(v) + "n";
     if (t === "symbol") return v.toString();
     if (t === "function") return `[Function: ${v.name || "(anonymous)"}]`;
-    if (v instanceof Error) return v.stack || `${v.name}: ${v.message}`;
+    if (v instanceof Error) return _inspectError(v, depth, seen);
     if (v instanceof RegExp) return v.toString();
     if (v instanceof Date) return v.toISOString();
-    if (typeof v[_inspectCustom] === "function") return String(v[_inspectCustom](depth, opts));
+    if (typeof v[_inspectCustom] === "function") return String(v[_inspectCustom](depth, { depth }));
     if (seen.has(v)) return "[Circular *1]";
     if (depth < 0) return Array.isArray(v) ? "[Array]" : "[Object]";
     seen.add(v);
@@ -877,6 +877,24 @@ function _inspect(v, depth, seen) {
     return out;
 }
 inspect.custom = _inspectCustom;
+
+// Node's shape: `Name: message`, the frames, then any own properties such as
+// an AssertionError's `code`. QuickJS leaves the first line out of `stack`, so
+// it is put back here unless the engine already wrote it.
+function _inspectError(err, depth, seen) {
+    const name = err.name || "Error";
+    const head = err.message ? `${name}: ${err.message}` : name;
+    const stack = typeof err.stack === "string" ? err.stack.replace(/\s+$/, "") : "";
+    let out = !stack ? head : stack.startsWith(head) ? stack : head + "\n" + stack;
+    const keys = Object.keys(err).filter(k => k !== "stack" && k !== "message" && k !== "name");
+    if (keys.length && !seen.has(err)) {
+        seen.add(err);
+        const parts = keys.map(k => `${_inspectKey(k)}: ${_inspect(err[k], depth - 1, seen)}`);
+        seen.delete(err);
+        out += " { " + parts.join(", ") + " }";
+    }
+    return out;
+}
 
 function format(f, ...args) {
     if (typeof f !== "string") {
@@ -992,6 +1010,142 @@ const util = {
     isNumber: (v) => typeof v === "number",
     isNullOrUndefined: (v) => v === null || v === undefined,
 };
+
+// ═══ console ══════════════════════════════════════════════════════════════════
+//
+// quickjs-libc's console has `log` and nothing else, and joins its arguments
+// with toString, so `console.error` threw and `console.log({ a: 1 })` printed
+// `[object Object]`. This one formats with util.format like node's. The global
+// writes through process.stdout / process.stderr looked up on each call, so a
+// program that swaps `process.stdout.write` out captures console output too.
+
+function _defaultStream(name) {
+    return {
+        write(s) {
+            const p = globalThis.process;
+            const stream = p && p[name];
+            if (stream && typeof stream.write === "function") return stream.write(s);
+            const f = name === "stderr" ? std.err : std.out;
+            f.puts(s);
+            f.flush();
+            return true;
+        },
+    };
+}
+
+function _padCenter(s, width) {
+    const left = Math.floor((width - s.length) / 2);
+    return " ".repeat(left) + s + " ".repeat(width - s.length - left);
+}
+
+// console.table's box drawing, laid out the way node lays it out.
+function _renderTable(head, rows) {
+    const widths = head.map((h, i) => Math.max(h.length, ...rows.map(r => r[i].length)) + 2);
+    const line = (l, m, r) => l + widths.map(w => "─".repeat(w)).join(m) + r;
+    const row = (cells) => "│" + cells.map((c, i) => _padCenter(c, widths[i])).join("│") + "│";
+    return [line("┌", "┬", "┐"), row(head), line("├", "┼", "┤"), ...rows.map(row), line("└", "┴", "┘")].join("\n");
+}
+
+class Console {
+    constructor(stdout, stderr) {
+        // Both the positional form and the { stdout, stderr } options form.
+        if (stdout && typeof stdout.write !== "function" && stdout.stdout) {
+            stderr = stdout.stderr;
+            stdout = stdout.stdout;
+        }
+        if (!stdout || typeof stdout.write !== "function") {
+            throw new TypeError("The \"stdout\" argument must be a writable stream");
+        }
+        const out = stdout;
+        const err = stderr && typeof stderr.write === "function" ? stderr : stdout;
+        const counts = new Map();
+        const timers = new Map();
+        let indent = "";
+
+        const emit = (stream, text) => {
+            if (indent) text = text.split("\n").map(l => indent + l).join("\n");
+            stream.write(text + "\n");
+        };
+        const fmt = (args) => (args.length ? format(...args) : "");
+
+        // Bound per instance, as node's are, so `const { log } = console` works.
+        this.log = (...args) => emit(out, fmt(args));
+        this.info = this.log;
+        this.debug = this.log;
+        this.dirxml = this.log;
+        this.error = (...args) => emit(err, fmt(args));
+        this.warn = this.error;
+        this.dir = (obj, options) => emit(out, inspect(obj, options));
+        this.trace = (...args) => {
+            const e = new Error(fmt(args));
+            e.name = "Trace";
+            emit(err, _inspectError(e, 0, new Set()));
+        };
+        this.assert = (value, ...args) => {
+            if (value) return;
+            emit(err, args.length ? "Assertion failed: " + fmt(args) : "Assertion failed");
+        };
+        this.count = (label = "default") => {
+            const n = (counts.get(String(label)) || 0) + 1;
+            counts.set(String(label), n);
+            emit(out, `${label}: ${n}`);
+        };
+        this.countReset = (label = "default") => { counts.delete(String(label)); };
+        this.time = (label = "default") => { timers.set(String(label), Date.now()); };
+        const elapsed = (label) => {
+            const start = timers.get(String(label));
+            if (start === undefined) {
+                emit(err, `Warning: No such label '${label}' for console.timeEnd()`);
+                return null;
+            }
+            return `${label}: ${(Date.now() - start).toFixed(3)}ms`;
+        };
+        this.timeLog = (label = "default", ...data) => {
+            const text = elapsed(label);
+            if (text !== null) emit(out, data.length ? text + " " + fmt(data) : text);
+        };
+        this.timeEnd = (label = "default") => {
+            const text = elapsed(label);
+            if (text !== null) { timers.delete(String(label)); emit(out, text); }
+        };
+        this.group = (...label) => {
+            if (label.length) this.log(...label);
+            indent += "  ";
+        };
+        this.groupCollapsed = this.group;
+        this.groupEnd = () => { indent = indent.slice(2); };
+        this.table = (data, properties) => {
+            if (data === null || typeof data !== "object") return this.log(data);
+            const cell = (v) => (v === undefined ? "" : _inspect(v, 0, new Set()));
+            if (data instanceof Map) {
+                const rows = [...data.entries()].map(([k, v], i) => [String(i), cell(k), cell(v)]);
+                return emit(out, _renderTable(["(iteration index)", "Key", "Values"], rows));
+            }
+            const keys = [];
+            let hasValues = false;
+            const entries = Object.entries(data);
+            for (const [, v] of entries) {
+                if (v !== null && typeof v === "object") {
+                    for (const k of Object.keys(v)) if (!keys.includes(k)) keys.push(k);
+                } else {
+                    hasValues = true;
+                }
+            }
+            const cols = properties ? properties.map(String) : keys;
+            const head = ["(index)", ...cols, ...(hasValues ? ["Values"] : [])];
+            const rows = entries.map(([k, v]) => {
+                const isObj = v !== null && typeof v === "object";
+                const cells = cols.map(c => (isObj ? cell(v[c]) : ""));
+                if (hasValues) cells.push(isObj ? "" : cell(v));
+                return [String(k), ...cells];
+            });
+            emit(out, _renderTable(head, rows));
+        };
+    }
+}
+
+const nodeConsole = new Console(_defaultStream("stdout"), _defaultStream("stderr"));
+nodeConsole.Console = Console;
 
 // ═══ assert ═══════════════════════════════════════════════════════════════════
 
@@ -3804,6 +3958,7 @@ const builtins = {
     'string_decoder': stringDecoderModule,
     'timers': timersModule,
     'timers/promises': timersPromises,
+    'console': nodeConsole,
     'zlib': zlib,
     'worker_threads': workerThreads,
     'child_process': childProcess,
@@ -4221,8 +4376,16 @@ const _hasOsTimer = typeof os.setTimeout === "function";
 const _intervals = new Map();
 let _intervalSeq = 1;
 
+// A throw from a nextTick or queueMicrotask callback is an uncaught exception
+// in node, not a rejection of some promise nobody holds.
 function _deferMicrotask(fn) {
-    Promise.resolve().then(fn);
+    Promise.resolve().then(() => {
+        try {
+            fn();
+        } catch (e) {
+            _fatalException(e, "uncaughtException");
+        }
+    });
 }
 
 function _setTimeout(fn, delay, ...args) {
@@ -4289,6 +4452,154 @@ function installTimerGlobals() {
     globalThis.queueMicrotask = _queueMicrotask;
 }
 
+// ═══ Process lifecycle (uncaught errors, rejections, exit) ════════════════════
+//
+// Stock quickjs-libc prints an exception thrown from a timer and carries on,
+// ignores unhandled rejections outright, and exits 0 once the loop drains, so a
+// crashed program looked like a successful one to anything reading the exit
+// code, wasmrun's agent mode included. The engine patch in
+// scripts/patch-nodejs.sh calls the hooks below at those three points instead,
+// and they do what node does: an uncaught error or an unhandled rejection
+// prints and exits 1 unless a listener takes it, and a drained loop emits
+// 'exit' and ends with process.exitCode.
+
+const HAS_HOST_HOOKS = typeof os.setHostHooks === "function";
+
+const _lifecycle = {
+    installed: false,
+    exiting: false,
+    pendingRejections: new Map(),
+    reportedRejections: new WeakSet(),
+    rejectionCheckArmed: false,
+};
+
+function _writeStderr(text) {
+    try {
+        std.err.puts(text);
+        std.err.flush();
+    } catch (_) { /* stderr closed: nothing left to tell */ }
+}
+
+function _formatUncaught(err) {
+    if (err instanceof Error) return _inspectError(err, 2, new Set());
+    return "Uncaught " + inspect(err);
+}
+
+function _exitCodeOf(code) {
+    return code === undefined || code === null ? 0 : code | 0;
+}
+
+/// Emit 'exit' once, then settle on the code a listener may have changed.
+function _emitExit(code) {
+    const proc = globalThis.process;
+    if (_lifecycle.exiting || !proc) return code;
+    _lifecycle.exiting = true;
+    proc.exitCode = code;
+    if (typeof proc.emit === "function") {
+        try {
+            proc.emit("exit", code);
+        } catch (e) {
+            _writeStderr(_formatUncaught(e) + "\n");
+            return 7; // node's code for an exception in an exit handler
+        }
+    }
+    return _exitCodeOf(proc.exitCode);
+}
+
+function _exitNow(code) {
+    try { std.out.flush(); std.err.flush(); } catch (_) { /* already closed */ }
+    std.exit(code);
+}
+
+/// Node's uncaught-exception path: an 'uncaughtException' listener takes the
+/// error and the program carries on, otherwise it is printed and the process
+/// exits 1.
+function _fatalException(err, origin) {
+    const proc = globalThis.process;
+    if (!_lifecycle.exiting && proc && typeof proc.listenerCount === "function" &&
+        proc.listenerCount("uncaughtException") > 0) {
+        try {
+            proc.emit("uncaughtException", err, origin);
+            return;
+        } catch (e) {
+            err = e; // a throwing handler is fatal in node too
+        }
+    }
+    _writeStderr(_formatUncaught(err) + "\n");
+    _exitNow(_emitExit(1));
+}
+
+/// The error node raises for a rejection whose reason is not an Error.
+function _rejectionError(reason) {
+    if (reason instanceof Error) return reason;
+    const e = new Error(
+        "This error originated either by throwing inside of an async function " +
+        "without a catch block, or by rejecting a promise which was not handled " +
+        `with .catch(). The promise rejected with the reason "${inspect(reason)}".`,
+    );
+    e.name = "UnhandledPromiseRejection";
+    e.code = "ERR_UNHANDLED_REJECTION";
+    return e;
+}
+
+// Checked once the current job queue has drained, the point at which node
+// decides a rejection went unhandled. A handler attached before then (the
+// `const p = f(); ...; p.catch(...)` shape) is not a false positive.
+function _processRejections() {
+    _lifecycle.rejectionCheckArmed = false;
+    const batch = [..._lifecycle.pendingRejections];
+    _lifecycle.pendingRejections.clear();
+    const proc = globalThis.process;
+    for (const [promise, reason] of batch) {
+        if (proc && typeof proc.listenerCount === "function" &&
+            proc.listenerCount("unhandledRejection") > 0) {
+            _lifecycle.reportedRejections.add(promise);
+            proc.emit("unhandledRejection", reason, promise);
+            continue;
+        }
+        _fatalException(_rejectionError(reason), "unhandledRejection");
+    }
+}
+
+function _onRejection(promise, reason, handled) {
+    if (handled) {
+        if (_lifecycle.pendingRejections.delete(promise)) return;
+        if (_lifecycle.reportedRejections.has(promise)) {
+            _lifecycle.reportedRejections.delete(promise);
+            const proc = globalThis.process;
+            if (proc && typeof proc.emit === "function") {
+                _setTimeout(() => proc.emit("rejectionHandled", promise), 0);
+            }
+        }
+        return;
+    }
+    _lifecycle.pendingRejections.set(promise, reason);
+    if (!_lifecycle.rejectionCheckArmed) {
+        _lifecycle.rejectionCheckArmed = true;
+        if (_hasOsTimer) os.setTimeout(_processRejections, 0);
+        else Promise.resolve().then(_processRejections);
+    }
+}
+
+/// The loop has drained: node's 'exit', then the code the C side exits with.
+function _onLoopDrained() {
+    const code = _emitExit(_exitCodeOf(globalThis.process && globalThis.process.exitCode));
+    try { std.out.flush(); std.err.flush(); } catch (_) { /* already closed */ }
+    return code;
+}
+
+const _hostHooks = {
+    rejection: _onRejection,
+    uncaught: (err) => _fatalException(err, "uncaughtException"),
+    exit: _onLoopDrained,
+};
+
+function installHostHooks() {
+    if (_lifecycle.installed || !HAS_HOST_HOOKS) return;
+    _lifecycle.installed = true;
+    os.setHostHooks(_hostHooks);
+}
+
 // ═══ Globals ═════════════════════════════════════════════════════════════════
 
 function setupGlobals(entryPath, extraArgs) {
@@ -4297,7 +4608,10 @@ function setupGlobals(entryPath, extraArgs) {
         ? ['nodejs', entryPath, ...(extraArgs || [])]
         : ['nodejs', ...(extraArgs || [])];
 
-    globalThis.process = {
+    // An EventEmitter, as in node: 'exit', 'uncaughtException' and
+    // 'unhandledRejection' listeners are how a program takes over its own
+    // failure handling, and `process.on` being undefined broke the many that do.
+    globalThis.process = Object.assign(new EventEmitter(), {
         argv,
         argv0: 'nodejs',
         env,
@@ -4307,12 +4621,12 @@ function setupGlobals(entryPath, extraArgs) {
         versions: { node: `${NODE_COMPAT_VERSION}.0.0`, quickjs: '2024-01-13' },
         pid: 1,
         ppid: 0,
+        exitCode: undefined,
         // std.exit() ends the process there and then, so anything still sitting
-        // in a stdio buffer would never be written. Nothing downstream gets a
-        // chance to flush it.
+        // in a stdio buffer would never be written. _exitNow flushes first.
         exit(code) {
-            try { std.out.flush(); std.err.flush(); } catch (_) { /* already closed */ }
-            std.exit(code | 0);
+            const p = globalThis.process;
+            _exitNow(_emitExit(_exitCodeOf(code === undefined && p ? p.exitCode : code)));
         },
         cwd() { return currentCwd(); },
         stdout: {
@@ -4331,7 +4645,7 @@ function setupGlobals(entryPath, extraArgs) {
             // Deferred as a microtask: runs after the current stack unwinds and
             // before any timer fires. Not a separate higher-priority queue like
             // real Node, but the ordering relative to timers is preserved.
-            Promise.resolve().then(() => fn(...args));
+            _deferMicrotask(() => fn(...args));
         },
         hrtime: (() => {
             const start = Date.now();
@@ -4340,8 +4654,10 @@ function setupGlobals(entryPath, extraArgs) {
                 return [Math.floor(ms / 1000), (ms % 1000) * 1e6];
             };
         })(),
-    };
+    });
     globalThis.global = globalThis;
+    globalThis.console = nodeConsole;
+    installHostHooks();
     globalThis.Buffer = Buffer;
     globalThis.TextEncoder = TextEncoder;
     globalThis.TextDecoder = TextDecoder;
@@ -4380,24 +4696,30 @@ function printVersion() {
     std.out.puts(`Engine: ${ENGINE}\n`);
     std.out.puts(`Target: WASI Preview 1\n`);
     std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, stdin, timers, async, buffer, exports-map resolution, inbound sockets\n`);
-    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises, process, tty, net, http, node:test (and node:* aliases)\n`);
+    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises, console, process, tty, net, http, node:test (and node:* aliases)\n`);
     std.out.puts(`Networking: ${HAS_SOCKETS ? 'net/http servers over a host-provided listening socket (WASMHUB_LISTEN_FD)' : 'unavailable in this build'}; outbound connect is not supported on WASI Preview 1\n`);
     std.out.puts(`Stubbed: zlib, worker_threads, child_process, https, dgram, tls (present, throw a clear error when used)\n`);
-    std.out.puts(`Globals: Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone\n`);
+    std.out.puts(`Globals: console, Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone\n`);
     std.out.flush();
 }
 
+/// The text `eval` prints for its result: a string as is, anything else the way
+/// `node -p` shows it. String() threw on objects with no toString, such as the
+/// handle setTimeout returns.
+function formatEvalResult(result) {
+    return typeof result === "string" ? result : inspect(result);
+}
+
 function evalCode(code) {
+    let result;
     try {
-        const result = (0, eval)(code);
-        if (result !== undefined) {
-            std.out.puts(String(result) + "\n");
-        }
+        result = (0, eval)(code);
     } catch (e) {
-        std.err.puts(`Error: ${e.message || e}\n`);
-        if (e.stack) std.err.puts(e.stack + "\n");
-        std.err.flush();
-        std.exit(1);
+        _fatalException(e, "uncaughtException");
+        return;
+    }
+    if (result !== undefined) {
+        std.out.puts(formatEvalResult(result) + "\n");
     }
     std.out.flush();
 }
@@ -4438,10 +4760,7 @@ function runFile(rawPath, extraArgs) {
         fn.call(entryModule.exports, entryModule.exports, requireFn, entryModule, entryPath, entryDir);
         entryModule.loaded = true;
     } catch (e) {
-        std.err.puts(`Error: ${e.message || e}\n`);
-        if (e.stack) std.err.puts(e.stack + "\n");
-        std.err.flush();
-        std.exit(1);
+        _fatalException(e, "uncaughtException");
     }
 }
 

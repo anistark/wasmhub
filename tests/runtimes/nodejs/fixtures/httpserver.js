@@ -4,12 +4,13 @@
 //
 // The host must bind the port and pass the descriptor in:
 //
-//   WASMHUB_LISTEN_FD=3 WASMHUB_LISTEN_ADDR=127.0.0.1:8080 \
-//   wasmtime run --tcplisten 127.0.0.1:8080 \
+//   wasmtime run -S preview2=n -S tcplisten=127.0.0.1:8080 \
 //     --env WASMHUB_LISTEN_FD=3 --env WASMHUB_LISTEN_ADDR=127.0.0.1:8080 \
-//     --dir tests/runtimes/nodejs/fixtures \
-//     runtimes/nodejs/nodejs-20.wasm -- \
-//     run tests/runtimes/nodejs/fixtures/httpserver.js
+//     runtimes/nodejs/nodejs-20.wasm \
+//     eval "$(cat tests/runtimes/nodejs/fixtures/httpserver.js)"
+//
+// Through eval because wasmtime puts the socket on fd 3, ahead of any --dir,
+// and wasi-libc stops scanning for preopens there. run-fixtures.sh does this.
 //
 // Then, from another shell:
 //   curl -s localhost:8080/hello        -> {"method":"GET","url":"/hello","body":""}

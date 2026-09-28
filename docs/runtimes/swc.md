@@ -18,7 +18,7 @@ eleventyNavigation:
 | | |
 |--|--|
 | **Engine** | `swc_core` 73.x |
-| **Binary size** | ~2.4 MB (optimized) |
+| **Binary size** | ~3.5 MB (optimized) |
 | **Target** | `wasm32-wasip1` (WASI Preview 1), **MVP-only instructions** |
 | **License** | Apache-2.0 |
 | **Source** | <https://swc.rs/> |

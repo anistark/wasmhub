@@ -19,7 +19,7 @@ eleventyNavigation:
 |--|--|
 | **Engine** | QuickJS 2024-01-13 (ES2020) |
 | **Node.js compat** | v20.x API surface |
-| **Binary size** | ~1.1 MB (optimized) |
+| **Binary size** | ~0.9 MB (optimized) |
 | **Target** | `wasm32-wasi` (WASI Preview 1) |
 | **License** | MIT |
 | **Source** | <https://bellard.org/quickjs/> |
@@ -38,7 +38,7 @@ eleventyNavigation:
 - ES2020: async/await, optional chaining, nullish coalescing, BigInt
 - **CommonJS `require()`** with relative paths (`./foo`), absolute paths (`/abs`), JSON imports, `package.json` `main` resolution, and `node_modules` lookup walking up the directory tree
 - `module.exports`, `exports`, `__filename`, `__dirname`, `require.cache`, `require.resolve`, `require.main`
-- **Built-in modules:** `path`, `fs`, `fs/promises`, `os`, `buffer`, `events`, `util`, `assert`, `stream`, `crypto`, `url`, `querystring`, `string_decoder`, `timers`, `timers/promises`, `process`, `tty`, `net`, `http` (all also under the `node:` prefix), plus `node:test`, which is prefix-only as it is in Node
+- **Built-in modules:** `path`, `fs`, `fs/promises`, `os`, `buffer`, `events`, `util`, `assert`, `stream`, `crypto`, `url`, `querystring`, `string_decoder`, `timers`, `timers/promises`, `console`, `process`, `tty`, `net`, `http` (all also under the `node:` prefix), plus `node:test`, which is prefix-only as it is in Node
 - **`events`** — full `EventEmitter` (`on`/`once`/`off`/`prependListener`/`removeAllListeners`/`emit`/`listeners`/`listenerCount`/`eventNames`, the `error` special-case, `newListener`/`removeListener` meta-events, static `EventEmitter.once`)
 - **`util`** — `format`, `inspect`, `inherits`, `promisify`, `callbackify`, `deprecate`, `debuglog`, `isDeepStrictEqual`, `types.*`, `TextEncoder`/`TextDecoder`
 - **`assert`** — `ok`/`equal`/`strictEqual`/`deepStrictEqual`/`throws`/`rejects`/`ifError`/`match`/… plus `assert.strict` and `AssertionError`
@@ -50,6 +50,7 @@ eleventyNavigation:
 - **`fs/promises`** — the promise API over the same synchronous implementations, also reachable as `fs.promises`
 - **`node:test`** — the built-in test runner: `test`/`it` with sync, async, promise and callback bodies, `describe`/`suite` nesting, `before`/`after`/`beforeEach`/`afterEach`, `skip`/`todo` as methods, options or context calls, TAP 13 output shaped like Node's, and a non-zero exit code when anything fails
 - **`process`** — the same object as the `process` global, so `require('node:process')` and the global cannot diverge
+- **`console`** — the global console, formatted with `util.format` the way Node's is: `log`/`info`/`debug` to stdout, `error`/`warn`/`trace` to stderr, plus `dir`, `assert`, `count`/`countReset`, `time`/`timeLog`/`timeEnd`, `group`/`groupEnd` indentation, `table`, and the `Console` class. Methods are bound, so `const { log } = console` works, and output goes through `process.stdout`/`process.stderr`, so replacing their `write` captures it
 - **`net`** — inbound only: `createServer`, `Server` (`listen`/`close`/`address`/`getConnections`, `connection`/`listening`/`close`/`error` events), `Socket` as a duplex stream (`data`/`end`/`error`/`close`, `write`, `end`, `destroy`, `pipe`, `for await`), and `isIP`/`isIPv4`/`isIPv6`. `connect`/`createConnection` throw `ERR_NOT_SUPPORTED`, because Preview 1 has no way to open a socket. See [Networking](#networking)
 - **`http`** — the server half over `net`: `createServer`, `IncomingMessage` (method, url, lowercased `headers`, `rawHeaders`, body as a readable stream), `ServerResponse` (`writeHead`, `setHeader`/`getHeader`/`removeHeader`, `write`, `end`), `STATUS_CODES` and `METHODS`. Request bodies are decoded by `Content-Length` or `Transfer-Encoding: chunked`; responses are chunked automatically when their length is not known in advance, and HTTP/1.1 keep-alive is honoured when the response can delimit itself. `request`/`get` throw `ERR_NOT_SUPPORTED`
 - **`tty`** — `isatty()`, which answers `false`: nothing in the sandbox is a terminal. `ReadStream`/`WriteStream` throw `ERR_NOT_SUPPORTED` rather than pretending to open a device
@@ -58,8 +59,9 @@ eleventyNavigation:
 - **`TextEncoder` / `TextDecoder`** (utf-8), plus `atob` / `btoa` globals
 - **Binary file I/O:** `fs.readFileSync(path)` returns a `Buffer` (or a string when an encoding is given); `fs.writeFileSync` / `appendFileSync` accept a `Buffer`/`Uint8Array` or string
 - **Standard input:** `process.stdin` is a readable stream over fd 0 (`data`/`end` events, `read()`, `pipe()`, `setEncoding`, and `for await`), and `fs.readFileSync(0)` / `fs.readFileSync('/dev/stdin')` read the same bytes. fd 0 can only be drained once, so the input is read on first use and shared between them; no input at all is an immediate end of file rather than a hang
-- **Globals:** `process` (`argv`, `env`, `cwd()`, `exit()`, `platform`, `stdout.write`, `stderr.write`, `stdin`, `nextTick`, `hrtime`), `global`, `console`
-- **Exit codes:** `process.exit(code)` ends the run with that code, flushing stdout and stderr first. An uncaught error, an unreadable entry file, and a failing `node:test` run all exit non-zero, which is how a caller tells a failed run from a successful one
+- **Globals:** `process` (an `EventEmitter` with `argv`, `env`, `cwd()`, `exit()`, `exitCode`, `platform`, `stdout.write`, `stderr.write`, `stdin`, `nextTick`, `hrtime`), `global`, `console`
+- **Exit codes:** the run fails the way Node's does, which is how a caller tells a failed run from a successful one. An uncaught error, thrown synchronously or from a timer, `nextTick` or I/O callback, prints `Name: message` and its frames and exits 1. So does an unhandled promise rejection, once the job queue drains without a handler attaching. `process.exit(code)` ends the run with that code, flushing stdout and stderr first, and a run that simply finishes exits with `process.exitCode`. An unreadable entry file and a failing `node:test` run exit non-zero too
+- **Process events:** `'exit'` (with the exit code; a listener can change `process.exitCode`), `'uncaughtException'` and `'unhandledRejection'`, whose listeners take the error over and let the run carry on, and `'rejectionHandled'`. The engine side is a wasmhub patch to quickjs-libc (`os.setHostHooks`), because stock QuickJS prints a timer's exception and carries on, ignores unhandled rejections, and exits 0 whatever happened
 - **Stack traces:** frames name the module they came from and report that file's own line numbers, so `at inner (/app/lib/boom.js:4)` points at real source. Modules are compiled through `std.evalScript` with a `filename` (a wasmhub patch adds the option) rather than `new Function`, which QuickJS would name `<input>`
 - **Timers & event loop:** `setTimeout`, `clearTimeout`, `setInterval`, `clearInterval`, `setImmediate`, `clearImmediate`, `queueMicrotask`, and a deferred `process.nextTick` — driven by the QuickJS event loop. `async`/`await`, Promise chains, and timer callbacks resolve after the entry script returns and the loop drains.
 - **Web platform globals:** `URL` / `URLSearchParams` (WHATWG parsing, relative resolution against a base, `searchParams` kept in sync with the URL), `crypto.getRandomValues` / `crypto.randomUUID` (entropy from the WASI `random_get` syscall via `os.getentropy`), `structuredClone` (cycles, `Map`/`Set`/`Date`/`RegExp`/`ArrayBuffer`/TypedArrays; functions and symbols throw `DataCloneError`), and `fetch` — defined but always rejecting with a clear network-unsupported error (`code: 'ERR_NETWORK_UNSUPPORTED'`) rather than a bare `ReferenceError`
@@ -95,13 +97,25 @@ host binds the port and passes the descriptor in through the environment:
 | `WASMHUB_LISTEN_FD` | descriptor of a bound, listening socket |
 | `WASMHUB_LISTEN_ADDR` | optional `host:port` it is bound to, so `server.address()` can answer truthfully |
 
-`wasmtime run --tcplisten` already works this way:
+wasmtime's listen-socket option already works this way, up to wasmtime 46:
+releases 14 to 46 spell it `-S tcplisten` and offer it only on the legacy
+Preview 1 implementation (`-S preview2=n`), older ones spell it `--tcplisten`.
+wasmtime 47 removed the legacy implementation, and with it any way to hand a
+listening socket to a Preview 1 module, so a newer wasmtime cannot run the
+server half at all:
 
 ```sh
-wasmtime run --tcplisten 127.0.0.1:8080 \
+wasmtime run -S preview2=n -S tcplisten=127.0.0.1:8080 \
   --env WASMHUB_LISTEN_FD=3 --env WASMHUB_LISTEN_ADDR=127.0.0.1:8080 \
-  --dir ./app nodejs-20.wasm -- run ./app/server.js
+  nodejs-20.wasm eval "$(cat app/server.js)"
 ```
+
+The server goes in through `eval` rather than `run ./app/server.js` because
+wasmtime puts the socket on fd 3, ahead of any `--dir`, and wasi-libc stops
+looking for preopened directories at the first descriptor that is not one. A
+`--dir` given alongside `tcplisten` is invisible to the runtime, so `run`
+cannot open the file. A host that hands the socket in after its preopens, and
+sets `WASMHUB_LISTEN_FD` to match, has no such limit.
 
 ```js
 // app/server.js

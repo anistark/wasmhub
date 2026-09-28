@@ -11,40 +11,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { loadRuntime, loadRuntimeWithState } from './harness.mjs';
-
-/// The `std.exit(N)` marker the harness throws, or null if `fn` did not exit.
-function exitCodeFrom(fn) {
-    try {
-        fn();
-    } catch (e) {
-        if (typeof e.__wasmhubExit === 'number') return e.__wasmhubExit;
-        throw e;
-    }
-    return null;
-}
-
-/// Run `fn` with the runtime's globals installed, then put node's back.
-///
-/// setupGlobals assigns over `crypto`, which node defines as getter-only, so
-/// the property is made writable for the duration and restored afterwards.
-async function withGlobals(fn) {
-    const { runtime, state } = await loadRuntimeWithState();
-    const cryptoDesc = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
-    const processDesc = Object.getOwnPropertyDescriptor(globalThis, 'process');
-    Object.defineProperty(globalThis, 'crypto', {
-        value: cryptoDesc.get ? cryptoDesc.get.call(globalThis) : cryptoDesc.value,
-        writable: true,
-        configurable: true,
-    });
-    try {
-        runtime.setupGlobals('/main.js', []);
-        return fn(globalThis.process, state);
-    } finally {
-        Object.defineProperty(globalThis, 'crypto', cryptoDesc);
-        Object.defineProperty(globalThis, 'process', processDesc);
-    }
-}
+import { loadRuntime, withGlobals, exitCodeFrom } from './harness.mjs';
 
 test('process.exit reaches std.exit with its code', async () => {
     await withGlobals((process, state) => {
@@ -56,7 +23,34 @@ test('process.exit reaches std.exit with its code', async () => {
 test('process.exit coerces a non-integer code', async () => {
     await withGlobals((process) => {
         assert.equal(exitCodeFrom(() => process.exit('7')), 7);
+    });
+});
+
+test('process.exit with no code exits 0', async () => {
+    await withGlobals((process) => {
         assert.equal(exitCodeFrom(() => process.exit()), 0);
+    });
+});
+
+test('process.exit with no code uses process.exitCode', async () => {
+    await withGlobals((process) => {
+        process.exitCode = 4;
+        assert.equal(exitCodeFrom(() => process.exit()), 4);
+    });
+});
+
+test('process.exit emits exit once, and a listener can change the code', async () => {
+    await withGlobals((process) => {
+        const seen = [];
+        process.on('exit', (code) => {
+            seen.push(code);
+            process.exitCode = 9;
+        });
+        assert.equal(exitCodeFrom(() => process.exit(2)), 9);
+        assert.deepEqual(seen, [2]);
+        // Calling exit from inside an exit listener, or again, does not re-emit.
+        assert.equal(exitCodeFrom(() => process.exit(5)), 5);
+        assert.deepEqual(seen, [2]);
     });
 });
 

@@ -59,6 +59,20 @@ jobs:
       - name: Optimize WASM binaries
         run: ./scripts/optimize-wasm.sh
 
+      # Against the binary that ships, before anything is staged. v0.5.0 went
+      # out with no console.error and with failed runs exiting 0, both of which
+      # these catch. wasmtime is pinned: 46.x is the last release that can hand
+      # a listening socket to a Preview 1 module, which the httpserver check needs.
+      - name: Set up wasmtime
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "46.0.1"
+
+      - name: Run nodejs fixtures against the release runtime
+        env:
+          WASMHUB_REQUIRE_HTTP: "1"
+        run: ./tests/runtimes/nodejs/run-fixtures.sh runtimes/nodejs/nodejs-20.wasm
+
       - name: Prepare release assets
         run: |
           mkdir -p release-assets

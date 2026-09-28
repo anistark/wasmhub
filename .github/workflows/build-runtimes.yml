@@ -6,6 +6,7 @@ on:
     paths:
       - 'runtimes/**'
       - 'scripts/**'
+      - 'tests/runtimes/**'
       - 'Dockerfile'
       - '.github/workflows/build-runtimes.yml'
   workflow_dispatch:
@@ -107,6 +108,22 @@ jobs:
             -e VERIFY=true \
             wasmhub-builder:latest \
             ./scripts/build-all.sh
+
+      # The node harness in `just ci` cannot reach the real engine, event loop,
+      # console or exit codes, so the built runtime runs the fixtures too.
+      # wasmtime is pinned: 46.x is the last release that can hand a listening
+      # socket to a Preview 1 module, which the httpserver check needs.
+      - name: Set up wasmtime
+        if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
+        uses: bytecodealliance/actions/wasmtime/setup@v1
+        with:
+          version: "46.0.1"
+
+      - name: Run nodejs fixtures against the built runtime
+        if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
+        env:
+          WASMHUB_REQUIRE_HTTP: "1"
+        run: ./tests/runtimes/nodejs/run-fixtures.sh runtimes/nodejs/nodejs-20.wasm
 
       - name: List built artifacts
         if: steps.should-build.outputs.build == 'true'

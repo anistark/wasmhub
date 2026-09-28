@@ -12,8 +12,8 @@ eleventyNavigation:
 |----------|---------|------|--------|
 | [Go](/runtimes/go/) | 1.23 | 261 KB | ✅ Available |
 | [Rust](/runtimes/rust/) | 1.82 | 76 KB | ✅ Available |
-| [Node.js](/runtimes/nodejs/) | 20 | ~1.1 MB | 🚧 Alpha |
-| [swc](/runtimes/swc/) | 73 | ~2.4 MB | 🚧 Alpha |
+| [Node.js](/runtimes/nodejs/) | 20 | ~0.9 MB | 🚧 Alpha |
+| [swc](/runtimes/swc/) | 73 | ~3.5 MB | 🚧 Alpha |
 | Python | — | — | Coming soon |
 | Ruby | — | — | Coming soon |
 | PHP | — | — | Coming soon |

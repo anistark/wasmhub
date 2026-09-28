@@ -29,6 +29,7 @@ build/<lang>/<lang>-<version>.wasm
         ↓ wasm-opt optimization
 runtimes/<lang>/<lang>-<version>.wasm
         ↓ scripts/verify-binary.sh (magic number, SHA256)
+        ↓ tests/runtimes/nodejs/run-fixtures.sh (nodejs only: real engine, exit codes)
         ↓ scripts/generate-metadata.sh (updates per-language manifest)
           ← runtimes/<lang>/features.txt (the published feature list)
 runtimes/<lang>/manifest.json
@@ -40,11 +41,12 @@ manifest.json (root)
 
 1. **Local or CI build:** `scripts/build-all.sh` runs inside Docker (`wasmhub-builder` image) to compile all runtimes.
 2. **Optimization:** `scripts/optimize-wasm.sh` runs `wasm-opt` with `-O3 --enable-bulk-memory`, generates gzip/brotli compressed variants.
-3. **Verification:** `scripts/verify-binary.sh` checks WASM magic number (`0061736d`) and SHA256 checksums.
+3. **Verification:** `scripts/verify-binary.sh` checks WASM magic number (`0061736d`) and SHA256 checksums. For nodejs, `tests/runtimes/nodejs/run-fixtures.sh` then runs every fixture against the optimized binary under wasmtime 46.0.1, checking exit codes as well as output; `release.yml` fails before staging any asset if one does not pass.
 4. **Manifest generation:** `scripts/generate-metadata.sh` updates `runtimes/<lang>/manifest.json` with new size/sha256/date, and with the feature list the build script read from `runtimes/<lang>/features.txt`. `scripts/generate-global-manifest.sh` aggregates all per-language manifests into `manifest.json`.
 5. **Release:** `just release <version>` or `scripts/publish.sh` creates a git tag, GitHub Release, and uploads all assets. The `release.yml` CI workflow then:
    - Builds all WASM runtimes in Docker
    - Optimizes and compresses them
+   - Runs the nodejs fixtures against the optimized `nodejs-20.wasm`
    - Uploads `.wasm`, `.wasm.gz`, `.wasm.br`, per-language manifests, global `manifest.json`, and `SHA256SUMS` as release assets
    - Builds CLI binaries for Linux (x86_64, aarch64), macOS (x86_64, aarch64), and Windows (x86_64)
    - Publishes to crates.io
@@ -67,6 +69,8 @@ manifest.json (root)
 4. **Never hand-edit `features` in a manifest.** The list lives in `runtimes/<lang>/features.txt` and is written into the manifest at build time, so a hand-added entry is silently lost at the next release. Add a feature to `features.txt` in the same change that implements it. (This is not hypothetical: the published v0.4.0 nodejs manifest advertises the v0.3.2 feature set, because the build script used to pass a hardcoded list.)
 5. **Builds must be reproducible.** All runtime builds happen inside the Docker image (`Dockerfile`). Don't add build steps that depend on host-specific tooling.
 6. **Optimization flags matter.** `--enable-bulk-memory` is required for both Go and Rust WASM outputs. Missing it breaks compatibility.
+7. **The nodejs runtime is verified against a built wasm, not only the node harness.** `just test-nodejs-builtins` loads `main.js` under node, with node's own console, event loop and process, so it cannot see what the QuickJS engine actually does. v0.5.0 shipped with no `console.error` and with every failed run exiting 0, and the harness passed throughout. Run `just test-nodejs-wasm` on a rebuilt runtime for any change to `runtimes/nodejs/` or `scripts/patch-nodejs.sh`, and add a fixture (with its expected exit code in `run-fixtures.sh`) for behavior only the engine can show.
+8. **QuickJS engine changes go in `scripts/patch-nodejs.sh`.** It patches the pristine QuickJS tarball at build time (`os.getentropy`, `std.evalScript`'s `filename`, the `os.sock*` bindings, and `os.setHostHooks` for uncaught errors, rejections and exit codes). Each patch is an idempotent Python edit that fails loudly when its anchor is missing. Never edit a checked-out QuickJS tree by hand.
 
 ---
 
@@ -137,7 +141,7 @@ just manifest                  # Regenerate global manifest
 4. Rebuild: `just docker-build && just docker-build-runtimes`
 5. The build script calls `generate-metadata.sh` which updates `runtimes/<lang>/manifest.json` — it adds the new version entry and sets it as `latest`.
 6. Regenerate global manifest: `just manifest`
-7. Verify: the build script runs `verify-binary.sh` automatically, but you can re-run manually.
+7. Verify: the build script runs `verify-binary.sh` automatically, but you can re-run manually. For nodejs, also run `just test-nodejs-wasm`.
 
 **Important:** A new version creates a new entry in the manifest's `versions` map. Old versions remain listed. The `latest` field is updated automatically.
 
@@ -154,6 +158,10 @@ For a full CI-equivalent check:
 4. **`just ci`** — Runs format-check → lint → test.
 
 Do not consider a change complete until all of the above pass cleanly.
+
+For changes to the nodejs runtime (`runtimes/nodejs/`, `scripts/patch-nodejs.sh`), also:
+
+5. **`just test-nodejs-wasm`** — rebuild the runtime and run the fixtures against it under wasmtime (see Critical Rule 7). `just ci` does not build wasm, so it cannot catch an engine-level regression.
 
 ### Additional Housekeeping
 
@@ -209,15 +217,28 @@ runtimes/
 ├── go/
 │   ├── main.go             # Go runtime source (compiled with TinyGo)
 │   └── manifest.json       # Per-language manifest
-└── rust/
-    ├── src/main.rs          # Rust runtime source (compiled with wasm32-wasip1)
-    ├── Cargo.toml
-    └── manifest.json        # Per-language manifest
+├── rust/
+│   ├── src/main.rs          # Rust runtime source (compiled with wasm32-wasip1)
+│   ├── Cargo.toml
+│   └── manifest.json        # Per-language manifest
+├── nodejs/
+│   ├── main.js              # Node.js API surface on QuickJS (bundled with qjsc)
+│   ├── wasi_sockets.c       # os.sock* bindings over WASI Preview 1 sockets
+│   ├── wasi_stubs.c, wasi_shims.h, wasi_include/  # WASI link/compile shims
+│   ├── features.txt
+│   └── manifest.json
+└── swc/
+    ├── src/main.rs          # TypeScript → JavaScript transpiler CLI (MVP-only wasm)
+    ├── features.txt
+    └── manifest.json
 
 scripts/
 ├── build-all.sh             # Orchestrates all runtime builds
 ├── build-go.sh              # Go → WASM via TinyGo
 ├── build-rust.sh            # Rust → WASM via wasm32-wasip1
+├── build-nodejs.sh          # QuickJS + main.js → WASM via WASI SDK
+├── patch-nodejs.sh          # Idempotent QuickJS engine patches applied at build time
+├── build-swc.sh             # swc CLI → MVP-only WASM
 ├── optimize-wasm.sh         # wasm-opt optimization + compression
 ├── verify-binary.sh         # WASM magic number + SHA256 verification
 ├── generate-metadata.sh     # Creates/updates per-language manifest.json
@@ -226,6 +247,12 @@ scripts/
 ├── install-wasi-sdk.sh      # WASI SDK installer
 └── lib/
     └── features.sh          # read_features(): features.txt → comma-separated list
+
+tests/runtimes/nodejs/       # nodejs runtime tests
+├── harness.mjs              # Loads main.js under plain node with std/os shimmed
+├── *.test.mjs               # Harness tests (`just test-nodejs-builtins`, in `just ci`)
+├── fixtures/                # Programs run against a built wasm
+└── run-fixtures.sh          # Runs them under wasmtime (`just test-nodejs-wasm`)
 
 docs/                        # Eleventy + libdoc docs site (deployed to GitHub Pages)
 ├── .eleventy.js
@@ -312,6 +339,8 @@ just build              # Library only
 just build-all          # Library + CLI
 just build-release      # Release binary
 just test               # All tests (--all-features)
+just test-nodejs-builtins  # nodejs runtime harness tests under plain node (in `just ci`)
+just test-nodejs-wasm [wasm]  # nodejs fixtures against a built wasm (needs wasmtime)
 just format             # rustfmt
 just lint               # clippy -D warnings
 just ci                 # format-check → lint → test
@@ -319,6 +348,7 @@ just install            # Install CLI locally
 just manifest           # Regenerate global manifest.json
 just docker-build       # Build Docker image
 just docker-build-runtimes  # Build all runtimes in Docker
+just build-nodejs       # Build the nodejs runtime in Docker
 just optimize           # Run wasm-opt on all runtimes
 just publish            # Full release (tag + GitHub + crates.io)
 just publish-check      # Dry-run crates.io publish
@@ -337,8 +367,8 @@ just api-docs           # Open Rust API docs (cargo doc)
 | Workflow | Trigger | What it does |
 |----------|---------|-------------|
 | `ci.yml` | Push to main, PRs | Format check + clippy + tests (Linux/macOS/Windows) |
-| `build-runtimes.yml` | Changes to `runtimes/` or `scripts/`, manual | Builds runtimes in Docker, uploads as artifacts |
-| `release.yml` | GitHub Release created, manual | Builds runtimes + CLI binaries for all platforms, uploads to release |
+| `build-runtimes.yml` | Changes to `runtimes/`, `scripts/` or `tests/runtimes/`, manual | Builds runtimes in Docker, runs the nodejs fixtures against the built runtime, uploads as artifacts |
+| `release.yml` | GitHub Release created, manual | Builds runtimes, runs the nodejs fixtures against the optimized binary, then builds CLI binaries for all platforms and uploads to release |
 | `docs.yml` | Push to main with `docs/**` changes, manual | Builds Eleventy site in `docs/`, deploys to GitHub Pages |
 
 ---
@@ -409,6 +439,9 @@ wasmhub cache clear-all [--yes]           # Clear all cache
 | `scripts/build-all.sh` | Runtime build orchestration |
 | `scripts/build-go.sh` | Go build script (reference for new languages) |
 | `scripts/build-rust.sh` | Rust build script (reference for new languages) |
+| `scripts/patch-nodejs.sh` | QuickJS engine patches for the nodejs runtime |
+| `runtimes/nodejs/main.js` | The nodejs runtime's entire Node.js API surface |
+| `tests/runtimes/nodejs/run-fixtures.sh` | nodejs fixtures against a built wasm; the release gate |
 | `scripts/generate-metadata.sh` | Creates/updates per-language manifest entries |
 | `scripts/lib/features.sh` | Reads a runtime's `features.txt` for the manifest generator |
 | `runtimes/*/features.txt` | Published feature list per runtime — the source of truth for the manifest's `features` |
@@ -432,4 +465,8 @@ wasmhub cache clear-all [--yes]           # Clear all cache
 - **Manifest `features` comes from `features.txt`.** `generate-metadata.sh` keeps a version's existing list when `--features` is omitted, so a caller that forgets the flag no longer strips the runtime's published capabilities — but a caller that passes a *stale* list still overwrites them.
 - **`stat` syntax differs between macOS and Linux.** Build scripts handle both (`stat -f%z` vs `stat -c%s`). Keep this pattern when adding new scripts.
 - **clippy must pass with zero warnings** — CI enforces `-D warnings`.
+- **The nodejs harness runs under node's console, loop and process.** Anything QuickJS does differently (its bare `console`, its event loop, its exit code) is invisible there; only `just test-nodejs-wasm` sees it.
+- **wasmtime 47+ cannot run the nodejs server half.** Handing a listening socket to a Preview 1 module needs wasmtime's legacy implementation (`-S preview2=n -S tcplisten=…`), which wasmtime 47 removed. CI pins wasmtime 46.0.1, and `run-fixtures.sh` skips the `httpserver.js` check on a newer one unless `WASMHUB_REQUIRE_HTTP=1`.
+- **A listen socket on fd 3 hides every `--dir`.** wasmtime puts `tcplisten` sockets ahead of preopens, and wasi-libc stops scanning for preopens at the first non-directory descriptor, so `run ./server.js` cannot open its file. Pass the server through `eval "$(cat server.js)"` instead.
+- **Building nodejs outside Docker** needs a WASI SDK (`WASI_SDK_PATH`), a native `cc` for `qjsc`, and GNU `sed` first on `PATH` on macOS: `patch-nodejs.sh` uses `sed -i` without a suffix. `build-nodejs.sh` also rewrites `runtimes/nodejs/manifest.json`, which is committed.
 - **`plan/` is gitignored.** Local planning only — never commit anything in it.

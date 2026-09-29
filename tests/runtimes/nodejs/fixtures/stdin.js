@@ -1,6 +1,6 @@
 // Smoke test for standard input, which needs a real runtime: the host has to
 // put bytes on fd 0. Feed it through the runner, e.g.
-//   echo -n 'hello from the host' | wasmrun exec --dir . nodejs-20.wasm -- run stdin.js
+//   echo -n 'hello from the host' | wasmtime run --dir . nodejs-20.wasm run ./stdin.js
 //
 // Expects exactly 'hello from the host' on stdin.
 

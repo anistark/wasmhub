@@ -1,7 +1,7 @@
 // Smoke test for package.json "exports" resolution, which needs a real
 // runtime: the resolver reads node_modules through WASI.
 //
-//   wasmrun exec --dir . nodejs-20.wasm -- run resolver.js
+//   wasmtime run --dir . nodejs-20.wasm run ./resolver.js
 
 const assert = require('node:assert');
 

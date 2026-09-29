@@ -64,22 +64,38 @@ wasmhub get swc 73
 
 ```sh
 # Print version info
-wasmrun exec swc-73.wasm -- version
+wasmrun exec swc-73.wasm version
+```
 
-# Transpile a file (requires --dir mount); writes app.js next to app.ts
-wasmrun exec --dir /path/to/src swc-73.wasm -- /path/to/src/app.ts
+Transpiling reads and writes files, so it needs a host that gives the program
+a directory. `wasmrun exec` gives it none; wasmtime's `--dir` does. Preopen the
+project root and name inputs under it:
+
+```sh
+# Transpile a file; writes app.js next to app.ts
+wasmtime run --dir . swc-73.wasm ./src/app.ts
 
 # Multiple inputs, TSX included
-wasmrun exec --dir /path/to/src swc-73.wasm -- /path/to/src/app.ts /path/to/src/view.tsx
+wasmtime run --dir . swc-73.wasm ./src/app.ts ./src/view.tsx
 
 # A tsconfig with experimentalDecorators, target and the automatic JSX runtime
-wasmrun exec --dir /path/to/src swc-73.wasm -- \
+# (which imports react/jsx-runtime unless --jsx-import-source says otherwise)
+wasmtime run --dir . swc-73.wasm \
   --decorators --target es2020 --jsx automatic --source-map \
-  /path/to/src/app.tsx
+  ./src/app.tsx
 
 # Then run the output with the Node.js runtime
-wasmrun exec --dir /path/to/src nodejs-20.wasm -- run /path/to/src/app.js
+wasmtime run --dir . nodejs-20.wasm run ./src/app.js
 ```
+
+Preopening the directory itself (`--dir ./src`) and naming `./src/app.ts` does
+not work: the transpiler cannot resolve a path through a preopen named after a
+subdirectory, so it reports the file as missing.
+
+wasmrun's agent mode runs this transpiler for you: an exec with
+`"language": "typescript"` transpiles every `.ts`/`.tsx` file in the session
+with it, maps the project's `tsconfig.json` onto these flags, and runs the
+result with the Node.js runtime.
 
 ## Use from Rust
 

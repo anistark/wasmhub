@@ -1,7 +1,7 @@
 // Smoke test for the node:test runner, which needs a real runtime: it prints
 // TAP through process.stdout and sets the process exit code.
 //
-//   wasmrun exec --dir . nodejs-20.wasm -- run testrunner.js
+//   wasmtime run --dir . nodejs-20.wasm run ./testrunner.js
 //
 // Expected: TAP for four tests, one of them skipped and one todo, and exit 0.
 // Flip SHOULD_FAIL to see a failing run exit 1.

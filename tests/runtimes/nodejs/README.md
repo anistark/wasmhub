@@ -16,6 +16,7 @@ fixtures/
   stream.js           # stream — Readable.from/Transform/Writable/PassThrough/pipe
   webglobals.js       # URL/URLSearchParams, structuredClone, crypto, fetch stub
   builtins.js         # fs/promises, timers/promises, crypto entropy, module stubs
+  append.js           # appendFile, sync and promise (needs the host to honour O_APPEND)
   stdin.js            # process.stdin, fs.readFileSync(0), tty, node:process
   testrunner.js       # the node:test runner: TAP output and exit code
   resolver.js         # package.json "exports": conditions, subpaths, encapsulation
@@ -33,28 +34,55 @@ fixtures/
 ## Running all of them
 
 ```sh
-just test-nodejs-wasm                          # runtimes/nodejs/nodejs-20.wasm
-just test-nodejs-wasm path/to/nodejs-20.wasm   # any other build
+just test-nodejs-wasm                            # under wasmtime
+just test-nodejs-wasmrun                         # under wasmrun's agent mode
+just test-nodejs-wasm path/to/nodejs-20.wasm     # any other build
+
+# One fixture, or a few, by name or name prefix
+node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun --only lifecycle,timers
 ```
 
-`run-fixtures.sh` runs every fixture below under `wasmtime`, including the
-failing cases (a mismatched stdin, a failing `node:test` run, each
-`lifecycle.js` scenario that should exit non-zero), and drives
-`httpserver.js` with `curl`. It checks each one's exit code as well as its
-output, because the exit code is the part the node harness cannot see: the
-v0.5.0 runtime had no `console.error`, and its failed runs exited 0. CI runs
-it on every runtime build (`build-runtimes.yml`) and on the release binary
-before any asset is staged (`release.yml`), with wasmtime pinned to 46.0.1 and
-`WASMHUB_REQUIRE_HTTP=1`, so the `httpserver.js` check cannot quietly turn into
-a skip.
+`run-fixtures.mjs` runs every fixture below, including the failing cases (a
+mismatched stdin, a failing `node:test` run, each `lifecycle.js` scenario that
+should exit non-zero), and drives `httpserver.js` over HTTP. It checks each
+one's exit code as well as its output, because the exit code is the part the
+node harness cannot see: the v0.5.0 runtime had no `console.error`, and its
+failed runs exited 0.
 
-## Running one
+The checks are one table run under either of two hosts:
+
+- **wasmtime**, a stock WASI host, run once per fixture with the fixtures
+  directory preopened.
+- **wasmrun**, the runtime's real consumer. It is not built on wasmtime: it
+  has its own interpreter and its own WASI. The runner starts `wasmrun agent`,
+  serves it the build under test as a wasmhub release (via
+  `WASMRUN_WASMHUB_BASE_URL`, with a manifest generated from the build's own
+  sha256, and a private `HOME` so no cached runtime stands in for it), and
+  runs each fixture in its own session through the exec API, `httpserver.js`
+  through the serve API. Any other runtime a session needs, in practice swc,
+  comes from this checkout when it holds a build its manifest describes, and
+  from the latest published release otherwise. `WASMRUN_BIN` picks the binary.
+
+A check that fails on one host for a reason outside this runtime carries a
+`knownFailure` for that host and is reported as `xfail`; if it starts passing,
+the run fails, so the marker goes when the bug does. Today that is `append` on
+wasmrun, whose `path_open` ignores the append flag
+([anistark/wasmrun#123](https://github.com/anistark/wasmrun/issues/123)).
+
+CI runs both hosts on every runtime build (`build-runtimes.yml`) and on the
+release binary before any asset is staged (`release.yml`), with wasmtime pinned
+to 46.0.1 and `WASMHUB_REQUIRE_HTTP=1`, so the wasmtime `httpserver.js` check
+cannot quietly turn into a skip, and wasmrun pinned to 0.23.0.
+
+## Running one by hand
+
+`--only` above runs one under either host. By hand, with wasmtime, map the
+fixtures directory to `/` (`wasmrun exec` preopens no directory, so it cannot
+open a fixture file):
 
 ```sh
-wasmrun exec \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/app.js
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /app.js
 ```
 
 Expected output:
@@ -72,10 +100,8 @@ require.main===module: true
 ### Event loop (`timers.js`)
 
 ```sh
-wasmrun exec \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/timers.js
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /timers.js
 ```
 
 Expected output (synchronous line first, then microtasks drain, then timers
@@ -96,10 +122,8 @@ interval 3
 ### Buffer + binary fs (`buffer.js`)
 
 ```sh
-wasmrun exec \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/buffer.js
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /buffer.js
 ```
 
 `buffer.js` uses `__dirname`, so its output is identical under real Node and the
@@ -144,11 +168,11 @@ real Node and the WASM runtime and diff:
 ```sh
 # events / util / assert — exact match
 node tests/runtimes/nodejs/fixtures/base.js > expected.txt
-wasmrun exec --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- run tests/runtimes/nodejs/fixtures/base.js | diff expected.txt -
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /base.js | diff expected.txt -
 
 # stream — order-independent (sort both)
-diff <(node …/stream.js | sort) <(wasmrun … run …/stream.js | sort)
+diff <(node …/stream.js | sort) <(wasmtime … run /stream.js | sort)
 ```
 
 `base.js` expected output:
@@ -193,8 +217,8 @@ identical under real Node — diff the two:
 
 ```sh
 node tests/runtimes/nodejs/fixtures/webglobals.js > expected.txt
-wasmrun exec --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- run tests/runtimes/nodejs/fixtures/webglobals.js | diff expected.txt -
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /webglobals.js | diff expected.txt -
 ```
 
 ---
@@ -233,10 +257,8 @@ process exit. That is what the fixtures are for, and they need a built runtime
 (`just test-nodejs-wasm` runs them all):
 
 ```sh
-wasmrun exec \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/builtins.js
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ --dir "$(mktemp -d)::/tmp" \
+  runtimes/nodejs/nodejs-20.wasm run /builtins.js
 ```
 
 Expected output:
@@ -255,10 +277,8 @@ builtins=pass
 Needs bytes on fd 0, so it is the one fixture whose input comes from the host:
 
 ```sh
-echo -n 'hello from the host' | wasmrun exec \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/stdin.js
+echo -n 'hello from the host' | wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /stdin.js
 ```
 
 Expected output:
@@ -274,10 +294,8 @@ stdin=pass
 ### Test runner (`testrunner.js`)
 
 ```sh
-wasmrun exec \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/testrunner.js
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /testrunner.js
 ```
 
 Prints TAP 13 for four tests (one skipped, one todo) and exits 0. Run it under
@@ -287,8 +305,10 @@ real node for the reference output and diff the two, ignoring `duration_ms`:
 node --test-reporter=tap --test tests/runtimes/nodejs/fixtures/testrunner.js
 ```
 
-Set `WASMHUB_TEST_FAIL=1` in the sandbox environment to add a failing test:
-the run must then exit 1, which is how wasmrun surfaces a failed test run.
+Set `WASMHUB_TEST_FAIL=1` in the sandbox environment (`--env
+WASMHUB_TEST_FAIL=1` under wasmtime, `"env"` in a wasmrun exec) to add a
+failing test: the run must then exit 1, which is how wasmrun surfaces a failed
+test run as `exit_code`.
 
 ### Inbound networking (`httpserver.js`)
 
@@ -296,7 +316,7 @@ WASI Preview 1 cannot bind a port from inside the sandbox, so the host binds it
 and passes the descriptor in. wasmtime's listen-socket option does exactly that
 up to wasmtime 46 (`-S tcplisten` on the legacy Preview 1 implementation, or
 `--tcplisten` before 14). wasmtime 47 removed the legacy implementation, so
-`run-fixtures.sh` skips this check on a newer one, and CI pins 46.0.1:
+`run-fixtures.mjs` skips this check on a newer one, and CI pins 46.0.1:
 
 ```sh
 wasmtime run -S preview2=n -S tcplisten=127.0.0.1:8080 \
@@ -309,6 +329,10 @@ wasmtime run -S preview2=n -S tcplisten=127.0.0.1:8080 \
 wasi-libc stops looking for preopened directories at the first descriptor that
 is not one, so a `--dir` alongside it is invisible and `run` cannot open the
 file.
+
+wasmrun has no such limit, since it preopens the session directory first and
+puts the socket after it. Its agent mode serves the fixture through
+`POST /api/v1/sessions/:id/serve`, which is what `--host wasmrun` does.
 
 Expected output on startup:
 
@@ -333,10 +357,8 @@ arming its timer once the last socket is gone.
 ### Module resolution (`resolver.js`)
 
 ```sh
-wasmrun exec \
-  --dir tests/runtimes/nodejs/fixtures \
-  runtimes/nodejs/nodejs-20.wasm -- \
-  run tests/runtimes/nodejs/fixtures/resolver.js
+wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /resolver.js
 ```
 
 Expected output:

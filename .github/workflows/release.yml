@@ -61,8 +61,10 @@ jobs:
 
       # Against the binary that ships, before anything is staged. v0.5.0 went
       # out with no console.error and with failed runs exiting 0, both of which
-      # these catch. wasmtime is pinned: 46.x is the last release that can hand
-      # a listening socket to a Preview 1 module, which the httpserver check needs.
+      # these catch, under both hosts. wasmtime is pinned: 46.x is the last
+      # release that can hand a listening socket to a Preview 1 module, which
+      # its httpserver check needs. Under wasmrun, the swc built in this job is
+      # served alongside nodejs, so the two are tested together.
       - name: Set up wasmtime
         uses: bytecodealliance/actions/wasmtime/setup@v1
         with:
@@ -71,7 +73,18 @@ jobs:
       - name: Run nodejs fixtures against the release runtime
         env:
           WASMHUB_REQUIRE_HTTP: "1"
-        run: ./tests/runtimes/nodejs/run-fixtures.sh runtimes/nodejs/nodejs-20.wasm
+        run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmtime runtimes/nodejs/nodejs-20.wasm
+
+      - name: Install wasmrun
+        run: |
+          curl -fsSLO "https://github.com/anistark/wasmrun/releases/download/v${WASMRUN_VERSION}/wasmrun-v${WASMRUN_VERSION}-x86_64.deb"
+          sudo apt-get install -y "./wasmrun-v${WASMRUN_VERSION}-x86_64.deb"
+          wasmrun --version
+        env:
+          WASMRUN_VERSION: "0.23.0"
+
+      - name: Run nodejs fixtures under wasmrun
+        run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun runtimes/nodejs/nodejs-20.wasm
 
       - name: Prepare release assets
         run: |

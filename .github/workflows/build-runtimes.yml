@@ -110,9 +110,10 @@ jobs:
             ./scripts/build-all.sh
 
       # The node harness in `just ci` cannot reach the real engine, event loop,
-      # console or exit codes, so the built runtime runs the fixtures too.
-      # wasmtime is pinned: 46.x is the last release that can hand a listening
-      # socket to a Preview 1 module, which the httpserver check needs.
+      # console or exit codes, so the built runtime runs the fixtures too, under
+      # two hosts. wasmtime is pinned: 46.x is the last release that can hand a
+      # listening socket to a Preview 1 module, which its httpserver check
+      # needs. wasmrun is the runtime's real consumer, pinned to a release.
       - name: Set up wasmtime
         if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
         uses: bytecodealliance/actions/wasmtime/setup@v1
@@ -123,7 +124,20 @@ jobs:
         if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
         env:
           WASMHUB_REQUIRE_HTTP: "1"
-        run: ./tests/runtimes/nodejs/run-fixtures.sh runtimes/nodejs/nodejs-20.wasm
+        run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmtime runtimes/nodejs/nodejs-20.wasm
+
+      - name: Install wasmrun
+        if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
+        run: |
+          curl -fsSLO "https://github.com/anistark/wasmrun/releases/download/v${WASMRUN_VERSION}/wasmrun-v${WASMRUN_VERSION}-x86_64.deb"
+          sudo apt-get install -y "./wasmrun-v${WASMRUN_VERSION}-x86_64.deb"
+          wasmrun --version
+        env:
+          WASMRUN_VERSION: "0.23.0"
+
+      - name: Run nodejs fixtures under wasmrun
+        if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
+        run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun runtimes/nodejs/nodejs-20.wasm
 
       - name: List built artifacts
         if: steps.should-build.outputs.build == 'true'

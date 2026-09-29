@@ -1,12 +1,13 @@
 // Smoke test for the process lifecycle, which needs a real runtime: the exit
 // code comes from the engine's loop, and the rejection tracker is an engine
 // hook (os.setHostHooks, added by scripts/patch-nodejs.sh). One scenario per
-// run, named by the first argument:
+// run, named by the first argument or, for a host that passes no arguments to
+// a script (wasmrun's agent mode), by LIFECYCLE_SCENARIO:
 //
-//   wasmrun exec --dir . nodejs-20.wasm -- run lifecycle.js <scenario>
+//   wasmtime run --dir . nodejs-20.wasm run ./lifecycle.js <scenario>
 //
 // The expected exit code and output of each are checked by
-// ../run-fixtures.sh.
+// ../run-fixtures.mjs.
 
 const scenarios = {
     // console.error exists and goes to stderr; objects are inspected.
@@ -52,7 +53,7 @@ const scenarios = {
     },
 };
 
-const name = process.argv[2];
+const name = process.argv[2] || process.env.LIFECYCLE_SCENARIO;
 if (!scenarios[name]) {
     console.error(`usage: lifecycle.js <${Object.keys(scenarios).join('|')}>`);
     process.exit(2);

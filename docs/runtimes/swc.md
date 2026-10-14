@@ -18,8 +18,8 @@ eleventyNavigation:
 | | |
 |--|--|
 | **Engine** | `swc_core` 73.x |
-| **Binary size** | ~3.5 MB (optimized) |
-| **Target** | `wasm32-wasip1` (WASI Preview 1), **MVP-only instructions** |
+| **Binary size** | ~3.6 MB (optimized) |
+| **Target** | `wasm32-wasip1` (WASI Preview 1), held to the features wasmrun's interpreter runs |
 | **License** | Apache-2.0 |
 | **Source** | <https://swc.rs/> |
 
@@ -117,10 +117,9 @@ Or inside Docker via the aggregate build: `BUILD_SWC=true ./scripts/build-all.sh
 
 ## Technical notes
 
-This is the one build that deliberately deviates from `scripts/build-rust.sh`: rustc 1.82+ emits post-MVP WASM instructions by default (multi-value, sign-ext, bulk-memory, nontrapping-fptoint), which downstream interpreters — notably wasmrun's exec mode, the primary consumer — reject at parse time. The build script therefore:
+It is a plain stable `wasm32-wasip1` build. Through v0.5 it was MVP-lowered (nightly `-Zbuild-std` under `-C target-cpu=mvp`, then `wasm-opt`'s `memory.copy`/`memory.fill` lowering), because wasmrun's interpreter rejected the post-MVP instructions rustc emits by default. wasmrun 0.23.0 runs them (multi-value, sign-ext, nontrapping float-to-int, bulk memory, reference types), and wasmrun pins the wasmhub release it uses, so an older wasmrun never fetches this build.
 
-1. Rebuilds `std` with nightly `-Zbuild-std` under `-C target-cpu=mvp`
-2. Runs `wasm-opt` with the plain MVP feature set, which doubles as validation that nothing post-MVP slipped through
+`wasm-opt` still runs with exactly that feature set enabled and nothing else, which validates the output: a toolchain that starts emitting something wasmrun does not run yet (SIMD, tail calls, GC) fails the build rather than a sandbox.
 
 The version label is `73` — the `swc_core` major — following the upstream-major naming of `nodejs-20` and `rust-1.82`.
 

@@ -278,3 +278,38 @@ test('a drained loop with no exitCode ends with 0', async () => {
         assert.equal(runtime._onLoopDrained(), 0);
     });
 });
+
+// ── process additions ────────────────────────────────────────────────────────
+
+test("'beforeExit' fires with the exit code, and not once the process is exiting", async () => {
+    await withGlobals(async (proc, state, runtime) => {
+        const seen = [];
+        runtime._onBeforeExit();   // no listener: nothing to do
+        proc.on('beforeExit', (code) => seen.push(code));
+        proc.exitCode = 4;
+        runtime._onBeforeExit();
+        runtime._onBeforeExit();   // the loop ran dry again
+        assert.deepEqual(seen, [4, 4]);
+        assert.equal(runtime._onLoopDrained(), 4);
+        runtime._onBeforeExit();   // 'exit' has been emitted
+        assert.deepEqual(seen, [4, 4]);
+    });
+});
+
+test('process.uptime, hrtime and memoryUsage have node\'s shapes', async () => {
+    await withGlobals(async (proc) => {
+        const t = proc.uptime();
+        assert.equal(typeof t, 'number');
+        assert.ok(t >= 0 && t < 60);
+        const [sec, nsec] = proc.hrtime();
+        assert.ok(Number.isInteger(sec) && Number.isInteger(nsec) && nsec < 1e9);
+        const diff = proc.hrtime([sec, nsec]);
+        assert.ok(diff[0] >= 0 && diff[1] >= 0);
+        assert.equal(typeof proc.hrtime.bigint(), 'bigint');
+        const m = proc.memoryUsage();
+        for (const k of ['rss', 'heapTotal', 'heapUsed', 'external', 'arrayBuffers']) {
+            assert.equal(typeof m[k], 'number', k);
+        }
+        assert.equal(typeof proc.memoryUsage.rss(), 'number');
+    });
+});

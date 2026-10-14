@@ -26,10 +26,9 @@
 //! Consumed by wasmrun's agent mode (`language: "typescript"`), which runs
 //! this module inside the session sandbox before the nodejs runtime.
 //!
-//! ⚠️ Build note: this crate MUST be compiled MVP-lowered (see
-//! `scripts/build-swc.sh`) — default rustc wasm builds emit post-MVP
-//! instructions (multi-value, sign-ext, bulk-memory) that downstream
-//! interpreters may not support.
+//! Build note: `scripts/build-swc.sh` validates the output against the
+//! WebAssembly features wasmrun's interpreter runs, so a toolchain that starts
+//! emitting anything newer fails the build rather than a sandbox.
 
 use swc_core::common::comments::SingleThreadedComments;
 use swc_core::common::source_map::DefaultSourceMapGenConfig;

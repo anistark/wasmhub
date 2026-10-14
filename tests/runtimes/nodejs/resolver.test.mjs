@@ -189,3 +189,34 @@ test('relative requires resolve files, extensions and directories', async () => 
     assert.equal(resolve('./data.json').id, '/app/data.json');
     assert.throws(() => resolve('./nope'), { code: 'MODULE_NOT_FOUND' });
 });
+
+// ── package.json "imports" ───────────────────────────────────────────────────
+
+test('a #import resolves to a builtin under the node condition', async () => {
+    // p-limit's shape: node gets the builtin, everything else a stub.
+    const files = pkgFiles('p-limit', {
+        name: 'p-limit',
+        imports: { '#async_hooks': { node: 'async_hooks', default: './stub.js' } },
+    }, { 'index.js': '', 'stub.js': '' });
+    const rt = await loadRuntime({ files: { '/app/index.js': '', ...files } });
+    assert.deepEqual(rt.resolveModule('#async_hooks', '/app/node_modules/p-limit'), {
+        builtin: true,
+        id: 'async_hooks',
+    });
+});
+
+test('a #import resolves relative targets and patterns from the nearest package', async () => {
+    const files = {
+        '/proj/package.json': JSON.stringify({
+            name: 'proj',
+            imports: { '#util/*': './src/util/*.js', '#cfg': { require: './cfg.cjs', default: './cfg.mjs' } },
+        }),
+        '/proj/src/util/strings.js': '',
+        '/proj/cfg.cjs': '',
+        '/proj/src/deep/index.js': '',
+    };
+    const rt = await loadRuntime({ files });
+    assert.equal(rt.resolveModule('#util/strings', '/proj/src/deep').id, '/proj/src/util/strings.js');
+    assert.equal(rt.resolveModule('#cfg', '/proj/src/deep').id, '/proj/cfg.cjs');
+    assert.throws(() => rt.resolveModule('#missing', '/proj/src/deep'), { code: 'ERR_PACKAGE_IMPORT_NOT_DEFINED' });
+});

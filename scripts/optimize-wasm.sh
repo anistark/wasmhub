@@ -37,12 +37,12 @@ for wasm in "${RUNTIMES_DIR}"/*/*.wasm; do
 
     if [[ "${SKIP_WASM_OPT}" != "true" ]]; then
         OPTIMIZED="${wasm}.opt"
-        # swc must stay MVP-only for downstream interpreters (see build-swc.sh).
-        # --mvp-features doubles as re-validation, while permissive features here
-        # would let wasm-opt reintroduce post-MVP ops (it rewrites shift patterns
-        # into sign-extension instructions, which broke the v0.3.1 swc asset)
+        # swc is held to the feature set wasmrun's interpreter runs (see
+        # build-swc.sh), so optimizing cannot introduce anything newer.
         if [[ "${wasm}" == */swc/* ]]; then
-            FEATURE_FLAGS=(--mvp-features)
+            FEATURE_FLAGS=(--mvp-features --enable-mutable-globals --enable-sign-ext
+                --enable-nontrapping-float-to-int --enable-bulk-memory
+                --enable-multivalue --enable-reference-types)
         else
             FEATURE_FLAGS=(--enable-bulk-memory)
         fi

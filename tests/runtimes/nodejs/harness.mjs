@@ -131,6 +131,7 @@ if (__h.sockets) {
     os.sockShutdown = (fd, how) => __h.sockets.shutdown(fd, how);
     os.sockClose = (fd) => __h.sockets.close(fd);
     os.sockNonblocking = (fd) => __h.sockets.nonblocking(fd);
+    if (__h.sockets.connect) os.sockConnect = (host, port) => __h.sockets.connect(host, port);
 }
 
 const scriptArgs = [];
@@ -163,6 +164,19 @@ export {
     netModule,
     httpModule,
     HAS_SOCKETS,
+    HAS_OUTBOUND,
+    fetchImpl,
+    Headers,
+    Request,
+    Response,
+    AbortController,
+    AbortSignal,
+    EventTarget,
+    asyncHooksModule,
+    pbkdf2Sync,
+    _onBeforeExit,
+    _hrtime,
+    _memoryUsage,
     STATUS_CODES,
     Console,
     nodeConsole,

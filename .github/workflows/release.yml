@@ -86,6 +86,11 @@ jobs:
       - name: Run nodejs fixtures under wasmrun
         run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun runtimes/nodejs/nodejs-20.wasm
 
+      # The -net build imports sock_open/sock_connect, which wasmtime lacks, so
+      # it runs under wasmrun only, outbound check included.
+      - name: Run nodejs-20-net fixtures under wasmrun
+        run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun runtimes/nodejs/nodejs-20-net.wasm
+
       - name: Prepare release assets
         run: |
           mkdir -p release-assets

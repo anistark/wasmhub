@@ -2,9 +2,9 @@
  * Host socket bindings for the nodejs runtime, exposed to JavaScript as the
  * os.sock* functions that runtimes/nodejs/main.js builds `net` and `http` on.
  *
- * ── Inbound only, and why ────────────────────────────────────────────────────
+ * ── Inbound everywhere, outbound in the -net build ───────────────────────────
  *
- * Everything here uses WASI Preview 1 as it is actually standardised:
+ * By default everything here uses WASI Preview 1 as it is actually standardised:
  * sock_accept, sock_recv, sock_send and sock_shutdown, plus fd_close and
  * fd_fdstat_set_flags. No extensions, so a binary containing this file imports
  * only what a stock preview1 host already provides and keeps instantiating
@@ -19,9 +19,22 @@
  * WebAssembly imports are static: declaring an extension would mean every host
  * must supply it or the module fails to instantiate before a line of JS runs,
  * and weak linkage does not help (wasm-ld emits the import or replaces the
- * call with a trapping stub, never both). Outbound connect therefore waits for
- * a separate networking build once the import contract is settled; until then
- * main.js reports it as unsupported with that reason.
+ * call with a trapping stub, never both). So outbound connect is a separate
+ * build: compiled with -DWASMHUB_OUTBOUND, this file also imports sock_open and
+ * sock_connect and adds os.sockConnect, and the result ships as
+ * nodejs-20-net.wasm beside the portable nodejs-20.wasm. main.js is the same
+ * in both and checks which bindings it got.
+ *
+ * The two extensions follow wasmrun's ABI (src/runtime/wasi/syscalls.rs, and
+ * the same calls in its browser shim), which takes the destination as a host
+ * *string* rather than a packed sockaddr, so the host's egress policy sees the
+ * name the program asked for and does the resolving itself:
+ *
+ *   sock_open(family, socktype, protocol, *fd_out)    family 0 = unspecified,
+ *                                                      socktype 1 = stream
+ *   sock_connect(fd, host_ptr, host_len, port)         blocks until connected
+ *
+ * A destination the policy refuses is EACCES; the reason stays with the host.
  *
  * ── How the listening descriptor arrives ─────────────────────────────────────
  *
@@ -73,6 +86,16 @@ int32_t wasmhub_sock_send(int32_t fd, const wasi_iovec *si_data,
 WASM_IMPORT("sock_shutdown")
 int32_t wasmhub_sock_shutdown(int32_t fd, uint32_t how);
 
+#ifdef WASMHUB_OUTBOUND
+WASM_IMPORT("sock_open")
+int32_t wasmhub_sock_open(uint32_t family, uint32_t socktype, uint32_t protocol,
+                          int32_t *fd_out);
+
+WASM_IMPORT("sock_connect")
+int32_t wasmhub_sock_connect(int32_t fd, const uint8_t *host, uint32_t host_len,
+                             uint32_t port);
+#endif
+
 WASM_IMPORT("fd_close")
 int32_t wasmhub_fd_close(int32_t fd);
 
@@ -82,6 +105,8 @@ int32_t wasmhub_fd_fdstat_set_flags(int32_t fd, uint32_t flags);
 #define WASI_FDFLAG_NONBLOCK 0x0004
 #define WASI_SHUT_RD         0x0001
 #define WASI_SHUT_WR         0x0002
+#define WASI_AF_UNSPEC       0
+#define WASI_SOCK_STREAM     1
 
 /* ── errno → Node error code ──────────────────────────────────────────────── */
 
@@ -94,13 +119,20 @@ static const char *errno_to_code(int32_t err)
     case 0:              return NULL;
     case EAGAIN:         return "EAGAIN";
     case EACCES:         return "EACCES";
+    case EADDRNOTAVAIL:  return "EADDRNOTAVAIL";
+    case EALREADY:       return "EALREADY";
     case EBADF:          return "EBADF";
     case ECONNABORTED:   return "ECONNABORTED";
+    case ECONNREFUSED:   return "ECONNREFUSED";
     case ECONNRESET:     return "ECONNRESET";
+    case EHOSTUNREACH:   return "EHOSTUNREACH";
     case EINTR:          return "EINTR";
     case EINVAL:         return "EINVAL";
+    case EIO:            return "EIO";
+    case EISCONN:        return "EISCONN";
     case EMFILE:         return "EMFILE";
     case EMSGSIZE:       return "EMSGSIZE";
+    case ENETUNREACH:    return "ENETUNREACH";
     case ENOBUFS:        return "ENOBUFS";
     case ENOMEM:         return "ENOMEM";
     case ENOTCONN:       return "ENOTCONN";
@@ -287,6 +319,46 @@ static JSValue js_wasmhub_sock_close(JSContext *ctx, JSValueConst this_val,
     return error_only(ctx, wasmhub_fd_close(fd));
 }
 
+#ifdef WASMHUB_OUTBOUND
+/* os.sockConnect(host, port) -> [fd, code]
+   Opens a stream socket and connects it, blocking until the host answers, and
+   hands back a non-blocking descriptor the poll loop treats like an accepted
+   one. main.js runs it from a timer, so a connect never happens inside the
+   call that asked for it and 'connect' listeners are attached by then. */
+static JSValue js_wasmhub_sock_connect(JSContext *ctx, JSValueConst this_val,
+                                       int argc, JSValueConst *argv)
+{
+    const char *host;
+    size_t host_len;
+    uint32_t port;
+    int32_t fd = -1, err;
+
+    (void)this_val; (void)argc;
+
+    host = JS_ToCStringLen(ctx, &host_len, argv[0]);
+    if (!host)
+        return JS_EXCEPTION;
+    if (JS_ToUint32(ctx, &port, argv[1])) {
+        JS_FreeCString(ctx, host);
+        return JS_EXCEPTION;
+    }
+
+    err = wasmhub_sock_open(WASI_AF_UNSPEC, WASI_SOCK_STREAM, 0, &fd);
+    if (err == 0) {
+        err = wasmhub_sock_connect(fd, (const uint8_t *)host,
+                                   (uint32_t)host_len, port);
+        if (err != 0) {
+            wasmhub_fd_close(fd);
+            fd = -1;
+        } else {
+            wasmhub_fd_fdstat_set_flags(fd, WASI_FDFLAG_NONBLOCK);
+        }
+    }
+    JS_FreeCString(ctx, host);
+    return result_pair(ctx, JS_NewInt32(ctx, fd), err);
+}
+#endif
+
 /* ── Registration ─────────────────────────────────────────────────────────── */
 
 /* Appended to quickjs-libc's js_os_funcs[] by scripts/patch-nodejs.sh, which
@@ -298,6 +370,9 @@ const JSCFunctionListEntry wasmhub_sock_funcs[] = {
     JS_CFUNC_DEF("sockShutdown",    2, js_wasmhub_sock_shutdown),
     JS_CFUNC_DEF("sockClose",       1, js_wasmhub_sock_close),
     JS_CFUNC_DEF("sockNonblocking", 1, js_wasmhub_sock_nonblocking),
+#ifdef WASMHUB_OUTBOUND
+    JS_CFUNC_DEF("sockConnect",     2, js_wasmhub_sock_connect),
+#endif
 };
 
 const int wasmhub_sock_funcs_count =

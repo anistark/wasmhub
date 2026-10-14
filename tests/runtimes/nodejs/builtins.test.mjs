@@ -7,7 +7,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, createHmac } from 'node:crypto';
+import { createHash, createHmac, pbkdf2Sync, webcrypto } from 'node:crypto';
 import { loadRuntime } from './harness.mjs';
 
 const rt = await loadRuntime();
@@ -208,7 +208,67 @@ test('crypto.createHmac handles a key longer than the block size', () => {
 });
 
 test('an unknown digest names the ones that exist', () => {
+    // sha512 is native-only: this harness has no os.hash* bindings, so it
+    // stands in for an engine without them.
     assert.throws(() => rt.nodeCrypto.createHash('sha512'), /not supported.*sha256/s);
+    assert.deepEqual(rt.nodeCrypto.getHashes(), ['md5', 'sha1', 'sha256']);
+});
+
+test('hash names are accepted in node\'s other spellings', () => {
+    const want = createHash('sha256').update('x').digest('hex');
+    for (const name of ['SHA256', 'SHA-256', 'RSA-SHA256']) {
+        assert.equal(rt.nodeCrypto.createHash(name).update('x').digest('hex'), want, name);
+    }
+});
+
+test('Hash#copy forks the state, and a finalized hash refuses more input', () => {
+    const h = rt.nodeCrypto.createHash('sha1').update('ab');
+    const fork = h.copy().update('X');
+    assert.equal(h.update('c').digest('hex'), createHash('sha1').update('abc').digest('hex'));
+    assert.equal(fork.digest('hex'), createHash('sha1').update('abX').digest('hex'));
+    assert.throws(() => h.digest(), { code: 'ERR_CRYPTO_HASH_FINALIZED' });
+    assert.throws(() => h.update('more'), { code: 'ERR_CRYPTO_HASH_FINALIZED' });
+    assert.throws(() => h.copy(), { code: 'ERR_CRYPTO_HASH_FINALIZED' });
+});
+
+test('a buffer reused after update() does not change the digest', () => {
+    const buf = Buffer.from('first');
+    const h = rt.nodeCrypto.createHash('md5').update(buf);
+    buf.write('XXXXX');
+    assert.equal(h.digest('hex'), createHash('md5').update('first').digest('hex'));
+});
+
+test('createHmac accepts a secret KeyObject', () => {
+    const key = rt.nodeCrypto.createSecretKey(Buffer.from('k3y'));
+    assert.equal(
+        rt.nodeCrypto.createHmac('sha256', key).update('m').digest('hex'),
+        createHmac('sha256', 'k3y').update('m').digest('hex'),
+    );
+});
+
+test('pbkdf2Sync matches node, including a key longer than one digest', () => {
+    for (const [digest, keylen] of [['sha256', 32], ['sha1', 50], ['md5', 7]]) {
+        assert.equal(
+            rt.pbkdf2Sync('password', 'salt', 3, keylen, digest).toString('hex'),
+            pbkdf2Sync('password', 'salt', 3, keylen, digest).toString('hex'),
+            `${digest}/${keylen}`,
+        );
+    }
+    assert.throws(() => rt.pbkdf2Sync('p', 's', 1, 8), { code: 'ERR_INVALID_ARG_TYPE' });
+    assert.throws(() => rt.pbkdf2Sync('p', 's', 0, 8, 'sha1'), RangeError);
+});
+
+test('crypto.pbkdf2 calls back asynchronously', async () => {
+    const key = await new Promise((resolve, reject) =>
+        rt.nodeCrypto.pbkdf2('pw', 'na', 2, 16, 'sha256', (err, k) => (err ? reject(err) : resolve(k))));
+    assert.equal(key.toString('hex'), pbkdf2Sync('pw', 'na', 2, 16, 'sha256').toString('hex'));
+});
+
+test('crypto.subtle.digest matches node', async () => {
+    const ours = await rt.nodeCrypto.webcrypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'));
+    const theirs = await webcrypto.subtle.digest('SHA-256', new TextEncoder().encode('abc'));
+    assert.deepEqual(Buffer.from(ours), Buffer.from(theirs));
+    await assert.rejects(rt.nodeCrypto.webcrypto.subtle.digest('MD5', new Uint8Array(1)), { name: 'NotSupportedError' });
 });
 
 test('crypto.timingSafeEqual compares contents', () => {

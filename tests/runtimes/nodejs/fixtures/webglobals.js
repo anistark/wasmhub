@@ -73,7 +73,9 @@ console.log('uuid.ok=' + (uuidRe.test(crypto.randomUUID()) && crypto.randomUUID(
 console.log('fetch.type=' + typeof fetch);
 if (process.platform === 'wasi') {
     fetch('http://example.com').catch(e =>
-        console.log('fetch.err=' + (/network/.test(e.message) ? 'clear' : 'BAD:' + e.message)));
+        // Without outbound sockets it says why; with them (the -net build),
+        // the host's policy refuses a destination nobody allowed.
+        console.log('fetch.err=' + (/network|fetch failed/.test(e.message) ? 'clear' : 'BAD:' + e.message)));
 } else {
     console.log('fetch.err=clear');
 }

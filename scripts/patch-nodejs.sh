@@ -211,8 +211,8 @@ SOCKEOF
     # exception thrown from a timer and carries on, never tracks promise
     # rejections at all, and exits 0 once the loop drains whatever happened, so
     # a crashed program reported success. os.setHostHooks(hooks) installs a
-    # rejection tracker and routes those three points into JS, which decides
-    # what node would: report, emit 'exit', and pick the exit code.
+    # rejection tracker and routes those points into JS, which decides what
+    # node would: report, emit 'beforeExit' and 'exit', and pick the exit code.
     if grep -q "wasmhub_host_hook" "${SOURCE_DIR}/quickjs-libc.c"; then
         echo "  [quickjs] host lifecycle hooks already present"
     else
@@ -286,6 +286,26 @@ static void wasmhub_rejection_tracker(JSContext *ctx, JSValueConst promise,
         js_std_dump_error(ctx);
     JS_FreeValue(ctx, ret);
     JS_FreeValue(ctx, fn);
+}
+
+/* The loop is about to drain: node's 'beforeExit'. Nonzero when a listener
+   scheduled more work (a job, a timer, an I/O handler), in which case the loop
+   carries on and asks again the next time it runs dry. */
+static int wasmhub_before_exit(JSContext *ctx)
+{
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    JSThreadState *ts = JS_GetRuntimeOpaque(rt);
+    JSValue fn, ret;
+    fn = wasmhub_host_hook(ctx, "beforeExit");
+    if (JS_IsUndefined(fn))
+        return 0;
+    ret = JS_Call(ctx, fn, JS_UNDEFINED, 0, NULL);
+    if (JS_IsException(ret))
+        wasmhub_uncaught(ctx);
+    JS_FreeValue(ctx, ret);
+    JS_FreeValue(ctx, fn);
+    return JS_IsJobPending(rt) || !list_empty(&ts->os_timers) ||
+           !list_empty(&ts->os_rw_handlers);
 }
 
 /* The loop has nothing left to wait on: node's 'exit'. The hook returns the
@@ -369,8 +389,11 @@ replace_once("""                if (err < 0) {
             }
         }
 
-        if (!os_poll_func || os_poll_func(ctx))
+        if (!os_poll_func || os_poll_func(ctx)) {
+            if (wasmhub_before_exit(ctx))
+                continue;
             break;
+        }
     }
     wasmhub_loop_drained(ctx);
 }
@@ -384,6 +407,230 @@ replace_once("static const JSCFunctionListEntry js_os_funcs[] = {",
 
 open(path, "w").write(content)
 HOOKEOF
+    fi
+
+    # Register the engine-backed helpers in runtimes/nodejs/host_bindings.c
+    # (native hashing, memoryUsage, the async context) on the `os` module,
+    # after the socket list and the same way.
+    if grep -q "wasmhub_host_funcs" "${SOURCE_DIR}/quickjs-libc.c"; then
+        echo "  [quickjs] host bindings already registered"
+    else
+        echo "  [quickjs] Registering host bindings in quickjs-libc.c"
+        python3 - "${SOURCE_DIR}/quickjs-libc.c" <<'HOSTEOF'
+import sys
+
+path = sys.argv[1]
+content = open(path).read()
+
+def replace_once(old, new, what):
+    global content
+    if old not in content:
+        sys.exit("quickjs-libc.c: " + what + " anchor not found (is the socket patch applied?)")
+    content = content.replace(old, new, 1)
+
+replace_once("extern const int wasmhub_sock_funcs_count;\n",
+             "extern const int wasmhub_sock_funcs_count;\n"
+             "/* wasmhub: engine-backed helpers (runtimes/nodejs/host_bindings.c) */\n"
+             "extern const JSCFunctionListEntry wasmhub_host_funcs[];\n"
+             "extern const int wasmhub_host_funcs_count;\n",
+             "socket extern declaration")
+replace_once("JS_AddModuleExportList(ctx, m, wasmhub_sock_funcs, wasmhub_sock_funcs_count);",
+             "JS_AddModuleExportList(ctx, m, wasmhub_sock_funcs, wasmhub_sock_funcs_count);\n"
+             "    JS_AddModuleExportList(ctx, m, wasmhub_host_funcs, wasmhub_host_funcs_count);",
+             "socket export list")
+replace_once("    return JS_SetModuleExportList(ctx, m, wasmhub_sock_funcs,\n"
+             "                                  wasmhub_sock_funcs_count);",
+             "    if (JS_SetModuleExportList(ctx, m, wasmhub_sock_funcs,\n"
+             "                               wasmhub_sock_funcs_count))\n"
+             "        return -1;\n"
+             "    return JS_SetModuleExportList(ctx, m, wasmhub_host_funcs,\n"
+             "                                  wasmhub_host_funcs_count);",
+             "socket export values")
+
+open(path, "w").write(content)
+HOSTEOF
+    fi
+
+    # Carry an async context through promise reactions, for AsyncLocalStorage.
+    # The context is captured when a reaction is *registered* (an `await`, a
+    # `.then`), not when it is queued: a promise is often settled from a socket
+    # poll or another request's code, and the continuation must still see the
+    # store it was waiting in. Every queued job carries one extra value past its
+    # arguments, which is the context it runs under; the engine swaps it in and
+    # out around the job. host_bindings.c reads and writes the current one.
+    if grep -q "wasmhub_async_context" "${SOURCE_DIR}/quickjs.c"; then
+        echo "  [quickjs] async context already present"
+    else
+        echo "  [quickjs] Adding the async context to quickjs.c"
+        python3 - "${SOURCE_DIR}/quickjs.c" <<'ASYNCEOF'
+import sys
+
+path = sys.argv[1]
+content = open(path).read()
+
+def replace(old, new, what, count=1):
+    global content
+    if content.count(old) != count:
+        sys.exit("quickjs.c: " + what + " anchor not found " + str(count) + " time(s)")
+    content = content.replace(old, new)
+
+# 1. The current context, its accessors, and a queueing call that takes one.
+#    A static rather than a runtime field: there is one runtime per process
+#    here. JS_FreeRuntime releases it before its leak check.
+replace("""int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
+                  int argc, JSValueConst *argv)
+{
+    JSRuntime *rt = ctx->rt;
+    JSJobEntry *e;
+    int i;
+
+    e = js_malloc(ctx, sizeof(*e) + argc * sizeof(JSValue));
+    if (!e)
+        return -1;
+    e->ctx = ctx;
+    e->job_func = job_func;
+    e->argc = argc;
+    for(i = 0; i < argc; i++) {
+        e->argv[i] = JS_DupValue(ctx, argv[i]);
+    }
+    list_add_tail(&e->link, &rt->job_list);
+    return 0;
+}
+""", """static JSValue wasmhub_async_context = JS_UNDEFINED;
+
+JSValue wasmhub_get_async_context(JSContext *ctx)
+{
+    return JS_DupValue(ctx, wasmhub_async_context);
+}
+
+void wasmhub_set_async_context(JSContext *ctx, JSValueConst value)
+{
+    JSValue old = wasmhub_async_context;
+    wasmhub_async_context = JS_DupValue(ctx, value);
+    JS_FreeValue(ctx, old);
+}
+
+/* argv[argc] holds the async context the job runs under. */
+static int wasmhub_enqueue_job(JSContext *ctx, JSJobFunc *job_func,
+                               int argc, JSValueConst *argv,
+                               JSValueConst async_ctx)
+{
+    JSRuntime *rt = ctx->rt;
+    JSJobEntry *e;
+    int i;
+
+    e = js_malloc(ctx, sizeof(*e) + (argc + 1) * sizeof(JSValue));
+    if (!e)
+        return -1;
+    e->ctx = ctx;
+    e->job_func = job_func;
+    e->argc = argc;
+    for(i = 0; i < argc; i++) {
+        e->argv[i] = JS_DupValue(ctx, argv[i]);
+    }
+    e->argv[argc] = JS_DupValue(ctx, async_ctx);
+    list_add_tail(&e->link, &rt->job_list);
+    return 0;
+}
+
+int JS_EnqueueJob(JSContext *ctx, JSJobFunc *job_func,
+                  int argc, JSValueConst *argv)
+{
+    return wasmhub_enqueue_job(ctx, job_func, argc, argv,
+                               wasmhub_async_context);
+}
+""", "JS_EnqueueJob")
+
+# 2. Run each job under its own context, then put the caller's back. Whatever
+#    the job left current (it may have called enterWith) is released.
+replace("""    JSValue res;
+    int i, ret;
+
+    if (list_empty(&rt->job_list)) {
+        *pctx = NULL;
+        return 0;
+    }
+
+    /* get the first pending job and execute it */
+    e = list_entry(rt->job_list.next, JSJobEntry, link);
+    list_del(&e->link);
+    ctx = e->ctx;
+    res = e->job_func(e->ctx, e->argc, (JSValueConst *)e->argv);
+""", """    JSValue res, saved_async_ctx;
+    int i, ret;
+
+    if (list_empty(&rt->job_list)) {
+        *pctx = NULL;
+        return 0;
+    }
+
+    /* get the first pending job and execute it */
+    e = list_entry(rt->job_list.next, JSJobEntry, link);
+    list_del(&e->link);
+    ctx = e->ctx;
+    saved_async_ctx = wasmhub_async_context;
+    wasmhub_async_context = e->argv[e->argc];
+    res = e->job_func(e->ctx, e->argc, (JSValueConst *)e->argv);
+    JS_FreeValue(ctx, wasmhub_async_context);
+    wasmhub_async_context = saved_async_ctx;
+""", "JS_ExecutePendingJob")
+
+# 3. Teardown: the jobs' extra slot, and the current context itself.
+replace("""    JS_FreeValueRT(rt, rt->current_exception);
+
+    list_for_each_safe(el, el1, &rt->job_list) {
+        JSJobEntry *e = list_entry(el, JSJobEntry, link);
+        for(i = 0; i < e->argc; i++)
+            JS_FreeValueRT(rt, e->argv[i]);
+""", """    JS_FreeValueRT(rt, rt->current_exception);
+    JS_FreeValueRT(rt, wasmhub_async_context);
+    wasmhub_async_context = JS_UNDEFINED;
+
+    list_for_each_safe(el, el1, &rt->job_list) {
+        JSJobEntry *e = list_entry(el, JSJobEntry, link);
+        for(i = 0; i <= e->argc; i++)
+            JS_FreeValueRT(rt, e->argv[i]);
+""", "JS_FreeRuntime")
+
+# 4. A promise reaction remembers the context it was registered in.
+replace("""    JSValue resolving_funcs[2];
+    JSValue handler;
+} JSPromiseReactionData;
+""", """    JSValue resolving_funcs[2];
+    JSValue handler;
+    JSValue async_ctx; /* wasmhub: context at registration */
+} JSPromiseReactionData;
+""", "JSPromiseReactionData")
+
+replace("""    JS_FreeValueRT(rt, rd->handler);
+    js_free_rt(rt, rd);
+""", """    JS_FreeValueRT(rt, rd->handler);
+    JS_FreeValueRT(rt, rd->async_ctx);
+    js_free_rt(rt, rd);
+""", "promise_reaction_data_free")
+
+# Marked, or a context reachable only through a pending reaction would look
+# like an external reference to the cycle collector and outlive the runtime.
+replace("""            JS_MarkValue(rt, rd->handler, mark_func);
+""", """            JS_MarkValue(rt, rd->handler, mark_func);
+            JS_MarkValue(rt, rd->async_ctx, mark_func);
+""", "js_promise_mark")
+
+replace("""        rd->handler = JS_DupValue(ctx, handler);
+        rd_array[i] = rd;
+""", """        rd->handler = JS_DupValue(ctx, handler);
+        rd->async_ctx = JS_DupValue(ctx, wasmhub_async_context);
+        rd_array[i] = rd;
+""", "perform_promise_then")
+
+# Both places a reaction is queued: on settlement, and at registration when
+# the promise has already settled.
+replace("JS_EnqueueJob(ctx, promise_reaction_job, 5, args);",
+        "wasmhub_enqueue_job(ctx, promise_reaction_job, 5, args, rd->async_ctx);",
+        "promise_reaction_job enqueue", count=2)
+
+open(path, "w").write(content)
+ASYNCEOF
     fi
 
     echo "  [quickjs] Patches applied"

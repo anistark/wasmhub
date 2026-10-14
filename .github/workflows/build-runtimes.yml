@@ -139,6 +139,12 @@ jobs:
         if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
         run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun runtimes/nodejs/nodejs-20.wasm
 
+      # The -net build imports sock_open/sock_connect, which wasmtime lacks, so
+      # it runs under wasmrun only, outbound check included.
+      - name: Run nodejs-20-net fixtures under wasmrun
+        if: steps.should-build.outputs.build == 'true' && matrix.runtime == 'nodejs'
+        run: node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun runtimes/nodejs/nodejs-20-net.wasm
+
       - name: List built artifacts
         if: steps.should-build.outputs.build == 'true'
         run: |

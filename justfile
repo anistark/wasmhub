@@ -55,6 +55,10 @@ test-nodejs-wasm wasm="runtimes/nodejs/nodejs-20.wasm":
 test-nodejs-wasmrun wasm="runtimes/nodejs/nodejs-20.wasm":
     node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun "{{wasm}}"
 
+# The outbound build, under wasmrun only (wasmtime cannot instantiate it)
+test-nodejs-net:
+    node tests/runtimes/nodejs/run-fixtures.mjs --host wasmrun runtimes/nodejs/nodejs-20-net.wasm
+
 # Run tests with output
 test-verbose:
     cargo test --all-features -- --nocapture

@@ -18,6 +18,11 @@
 // --only takes a comma-separated list of check names, each matching itself and
 // any check it prefixes: `--only timers`, `--only lifecycle,httpserver`.
 //
+// A nodejs-20-net build (one importing sock_open/sock_connect) also runs the
+// outbound check, against an origin this script serves on loopback. Only
+// wasmrun has those imports, and it is started with --allow-net for loopback;
+// wasmtime cannot instantiate such a build at all, so it is refused there.
+//
 // The httpserver check needs its host to hand the program a listening socket.
 // wasmrun always can. wasmtime can only through its legacy Preview 1
 // implementation, which wasmtime 47 removed, so there the check is skipped on a
@@ -66,6 +71,10 @@ const CHECKS = [
     },
     { name: 'resolver', file: 'resolver.js', code: 0, text: 'resolver=pass' },
     { name: 'testrunner', file: 'testrunner.js', code: 0, text: '# pass 3' },
+    { name: 'hashes', file: 'hashes.js', code: 0, text: 'hashes=pass' },
+    { name: 'asynccontext', file: 'asynccontext.js', code: 0, text: 'asynccontext=pass' },
+    // env is filled in once the origin is listening.
+    { name: 'outbound', file: 'outbound.js', code: 0, text: 'outbound=pass', netOnly: true },
     // A failing node:test run has to exit 1, or a caller cannot see it failed.
     { name: 'testrunner-failing', file: 'testrunner.js', env: { WASMHUB_TEST_FAIL: '1' }, code: 1, text: '# fail 1' },
     { name: 'stdin', file: 'stdin.js', stdin: 'hello from the host', code: 0, text: 'stdin=pass' },
@@ -150,7 +159,7 @@ function wasmtimeHost(wasm) {
     };
 }
 
-async function wasmrunHost(wasm) {
+async function wasmrunHost(wasm, { allowLoopback = false } = {}) {
     const bin = process.env.WASMRUN_BIN || 'wasmrun';
     const version = spawnSync(bin, ['--version'], { encoding: 'utf8' });
     if (version.status !== 0) throw new Error(`cannot run ${bin}; set WASMRUN_BIN or put wasmrun on PATH`);
@@ -198,7 +207,9 @@ async function wasmrunHost(wasm) {
     // back a runtime some earlier build left behind.
     const home = mkdtempSync(join(tmpdir(), 'wasmhub-wasmrun-home-'));
     const agentPort = 20000 + Math.floor(Math.random() * 20000);
-    const agent = spawn(bin, ['agent', '--port', String(agentPort)], {
+    const agentArgs = ['agent', '--port', String(agentPort)];
+    if (allowLoopback) agentArgs.push('--allow-net', '127.0.0.1/32');
+    const agent = spawn(bin, agentArgs, {
         env: { ...process.env, HOME: home, WASMRUN_WASMHUB_BASE_URL: releaseUrl },
         stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -294,6 +305,40 @@ async function wasmrunHost(wasm) {
 }
 
 // ── Shared helpers ───────────────────────────────────────────────────────────
+
+/// Whether a build imports wasmrun's outbound socket extensions.
+function isNetBuild(wasm) {
+    const module = new WebAssembly.Module(readFileSync(wasm));
+    return WebAssembly.Module.imports(module).some((i) => i.name === 'sock_connect');
+}
+
+/// The server outbound.js talks to.
+async function startOrigin() {
+    const server = createServer((req, res) => {
+        let body = '';
+        req.on('data', (d) => { body += d; });
+        req.on('end', () => {
+            if (req.url === '/json') {
+                res.setHeader('content-type', 'application/json');
+                res.end('{"hello":"world"}');
+            } else if (req.url === '/echo') {
+                res.setHeader('content-type', 'application/json');
+                res.end(JSON.stringify({ method: req.method, headers: req.headers, body }));
+            } else if (req.url === '/redirect') {
+                res.writeHead(302, { location: '/json' });
+                res.end();
+            } else if (req.url === '/chunked') {
+                res.write('one,');
+                setTimeout(() => { res.write('two,'); res.end('three'); }, 5);
+            } else {
+                res.writeHead(404);
+                res.end();
+            }
+        });
+    });
+    await new Promise((res) => server.listen(0, '127.0.0.1', res));
+    return server;
+}
 
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
@@ -392,8 +437,18 @@ async function main() {
         process.exit(1);
     }
 
-    const host = hostName === 'wasmrun' ? await wasmrunHost(wasm) : wasmtimeHost(wasm);
-    console.log(`host: ${host.name}\n`);
+    const net = isNetBuild(wasm);
+    if (net && hostName !== 'wasmrun') {
+        throw usageError(`${wasm} imports sock_open/sock_connect, which only wasmrun provides; use --host wasmrun`);
+    }
+    const origin = net ? await startOrigin() : null;
+    const host = hostName === 'wasmrun' ? await wasmrunHost(wasm, { allowLoopback: net }) : wasmtimeHost(wasm);
+    console.log(`host: ${host.name}${net ? ' (outbound build)' : ''}\n`);
+    if (origin) {
+        const check = CHECKS.find((c) => c.name === 'outbound');
+        // 10.255.255.1 is outside the 127.0.0.1/32 the agent allows.
+        check.env = { OUTBOUND_ORIGIN: `http://127.0.0.1:${origin.address().port}/`, OUTBOUND_DENIED: '10.255.255.1:80' };
+    }
 
     let passed = 0;
     let failed = 0;
@@ -410,7 +465,7 @@ async function main() {
     };
 
     try {
-        for (const check of CHECKS.filter((c) => selected(c.name))) {
+        for (const check of CHECKS.filter((c) => selected(c.name) && (net || !c.netOnly))) {
             const { code, out } = await host.run(check);
             const ok = code === check.code && out.includes(check.text);
             const known = check.knownFailure && check.knownFailure[host.key];
@@ -438,6 +493,7 @@ async function main() {
         }
     } finally {
         await host.close();
+        if (origin) origin.close();
     }
 
     console.log(`\n${passed} passed, ${failed} failed${xfailed ? `, ${xfailed} known failure${xfailed > 1 ? 's' : ''}` : ''}`);

@@ -1,0 +1,8 @@
+# Feature flags the nodejs-20-net build adds to features.txt. It is the same
+# runtime with wasmrun's sock_open/sock_connect extensions linked in, so these
+# are only what outbound connect makes possible. scripts/build-nodejs.sh
+# publishes features.txt plus this list for the "20-net" manifest entry.
+
+net-client
+http-client
+fetch

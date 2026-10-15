@@ -3,12 +3,16 @@ set -euo pipefail
 
 # Builds the swc TypeScript transpiler as a WASI CLI.
 #
-# ⚠️ Unlike the other Rust builds, this one MUST be MVP-lowered: rustc ≥1.82
-# enables post-MVP WASM features by default (multi-value, sign-ext,
-# bulk-memory, nontrapping-fptoint) that downstream interpreters — notably
-# wasmrun's exec mode, the primary consumer of this artifact — do not support.
-# `-C target-cpu=mvp` needs std rebuilt with the same features, hence
-# nightly + `-Zbuild-std`.
+# A plain stable wasm32-wasip1 build. Until wasmhub v0.6 this one was
+# MVP-lowered (nightly, -Zbuild-std, target-cpu=mvp, then wasm-opt's
+# memory.copy/fill lowering), because wasmrun's interpreter rejected the
+# post-MVP features rustc enables by default. wasmrun 0.23.0 runs them
+# (multi-value, sign-ext, nontrapping-fptoint, bulk-memory), and wasmrun pins
+# the wasmhub release it consumes, so an older wasmrun never sees this build.
+#
+# What is still checked: the result is validated against the feature set
+# wasmrun implements (WASMRUN_FEATURES below), so a toolchain that starts
+# emitting something newer (SIMD, tail calls, GC) fails here, not in a sandbox.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "${SCRIPT_DIR}")"
@@ -23,7 +27,17 @@ BUILD_DIR="${PROJECT_ROOT}/build/swc"
 SWC_VERSION="${SWC_VERSION:-73}"
 TARGET="${TARGET:-wasm32-wasip1}"
 OPTIMIZE="${OPTIMIZE:-true}"
-NIGHTLY_TOOLCHAIN="${NIGHTLY_TOOLCHAIN:-nightly}"
+
+# What wasmrun's interpreter runs. wasm-opt validates against exactly these.
+WASMRUN_FEATURES=(
+    --mvp-features
+    --enable-mutable-globals
+    --enable-sign-ext
+    --enable-nontrapping-float-to-int
+    --enable-bulk-memory
+    --enable-multivalue
+    --enable-reference-types
+)
 
 usage() {
     echo "Usage: $0 [options] <cargo_project_dir>"
@@ -62,17 +76,9 @@ if [[ ! -f "${PROJECT_DIR}/Cargo.toml" ]]; then
     exit 1
 fi
 
-if ! rustup toolchain list | grep -q "nightly"; then
-    echo "Installing nightly toolchain (required for -Zbuild-std)..."
-    rustup toolchain install "${NIGHTLY_TOOLCHAIN}"
-fi
-if ! rustup component list --toolchain "${NIGHTLY_TOOLCHAIN}" --installed | grep -q rust-src; then
-    echo "Adding rust-src component (required for -Zbuild-std)..."
-    rustup component add rust-src --toolchain "${NIGHTLY_TOOLCHAIN}"
-fi
-if ! rustup target list --toolchain "${NIGHTLY_TOOLCHAIN}" --installed | grep -q "${TARGET}"; then
+if ! rustup target list --installed | grep -q "${TARGET}"; then
     echo "Adding Rust target: ${TARGET}"
-    rustup target add "${TARGET}" --toolchain "${NIGHTLY_TOOLCHAIN}"
+    rustup target add "${TARGET}"
 fi
 
 OUTPUT_NAME="${OUTPUT_NAME:-swc-${SWC_VERSION}.wasm}"
@@ -80,15 +86,13 @@ OUTPUT_PATH="${BUILD_DIR}/${OUTPUT_NAME}"
 
 mkdir -p "${BUILD_DIR}"
 
-echo "Building swc transpiler (MVP-lowered)..."
+echo "Building swc transpiler..."
 echo "  Project: ${PROJECT_DIR}"
 echo "  Target: ${TARGET}"
 echo "  Output: ${OUTPUT_PATH}"
 
 pushd "${PROJECT_DIR}" > /dev/null
-RUSTFLAGS="-C target-cpu=mvp -C target-feature=+mutable-globals" \
-    cargo "+${NIGHTLY_TOOLCHAIN}" build -Zbuild-std=std,panic_abort \
-    --target "${TARGET}" --release
+cargo build --target "${TARGET}" --release
 BINARY_NAME=$(cargo metadata --format-version 1 --no-deps | jq -r '.packages[0].targets[] | select(.kind[] == "bin") | .name' | head -1)
 popd > /dev/null
 
@@ -100,30 +104,20 @@ fi
 
 cp "${BUILT_WASM}" "${OUTPUT_PATH}"
 
-# MVP lowering + validation. Even with -C target-cpu=mvp, the binary picks up
-# memory.copy/memory.fill from rustup's PREBUILT wasi-libc (memcpy, memmove,
-# strdup, ...), which recent toolchains ship compiled with bulk-memory enabled;
-# no RUSTFLAGS can fix precompiled objects. So first lower those ops back to
-# MVP loops (needs binaryen >= 120), then optimize under --mvp-features, which
-# doubles as a validation step: it hard-fails if any post-MVP instruction
-# remains. wasm-opt is mandatory here — without the lowering pass the artifact
-# is NOT MVP-clean and wasmrun's exec mode rejects it at parse time.
+# Optimize, and validate against what wasmrun runs: --mvp-features plus the
+# list above means wasm-opt refuses any instruction outside it, and cannot
+# introduce one while optimizing either.
 if [[ "${OPTIMIZE}" == "true" ]]; then
     if ! command -v wasm-opt &> /dev/null; then
-        echo "Error: wasm-opt not found — required to MVP-lower the swc artifact."
-        echo "Install binaryen >= 120, or pass --no-optimize for an unlowered dev build."
+        echo "Error: wasm-opt not found; it optimizes and validates the swc artifact."
+        echo "Install binaryen, or pass --no-optimize for an unchecked dev build."
         exit 1
     fi
-    echo "Using $(command -v wasm-opt) ($(wasm-opt --version))"
-    echo "Lowering bulk-memory ops from wasi-libc to MVP loops..."
-    wasm-opt --enable-bulk-memory-opt --llvm-memory-copy-fill-lowering \
-        "${OUTPUT_PATH}" -o "${OUTPUT_PATH}.lowered"
-    echo "Optimizing with wasm-opt (strict MVP feature set)..."
-    wasm-opt --mvp-features -O3 "${OUTPUT_PATH}.lowered" -o "${OUTPUT_PATH}.opt"
-    rm "${OUTPUT_PATH}.lowered"
+    echo "Optimizing with $(command -v wasm-opt) ($(wasm-opt --version)), wasmrun's feature set..."
+    wasm-opt "${WASMRUN_FEATURES[@]}" -O3 "${OUTPUT_PATH}" -o "${OUTPUT_PATH}.opt"
     mv "${OUTPUT_PATH}.opt" "${OUTPUT_PATH}"
 else
-    echo "Warning: skipping MVP lowering (--no-optimize) — artifact will contain bulk-memory ops"
+    echo "Warning: skipping wasm-opt (--no-optimize): unoptimized and not validated"
 fi
 
 SIZE=$(stat -f%z "${OUTPUT_PATH}" 2>/dev/null || stat -c%s "${OUTPUT_PATH}")

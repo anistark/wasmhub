@@ -97,8 +97,8 @@ const wasmBytes = await response.arrayBuffer();
 |----------|----------|------|--------|-------|
 | **Go** | 1.23 | 261 KB | ✅ Available | Built with TinyGo, supports filesystem, env, args, stdio |
 | **Rust** | 1.82 | 76 KB | ✅ Available | Full std library support with wasm32-wasip1 target |
-| **Node.js** | 20 | ~0.9 MB | 🚧 Alpha | Built with QuickJS (ES2020), supports eval, run, stdio, env, filesystem via WASI, a CommonJS stdlib (`path`, `fs`, `crypto`, `url`, `stream`, `buffer`, …), and inbound `net`/`http` servers over a host-provided socket |
-| **swc** | 73 | ~3.5 MB | 🚧 Alpha | TypeScript → JavaScript transpiler (tool, not a language runtime): strips types, lowers TSX and ES modules to CommonJS for the Node.js runtime. MVP-only WASM for interpreter compatibility |
+| **Node.js** | 20, 20-net | ~1.3 MB | 🚧 Alpha | Built with QuickJS (ES2020), supports eval, run, stdio, env, filesystem via WASI, a CommonJS stdlib (`path`, `fs`, `crypto` with native digests, `url`, `stream`, `buffer`, `async_hooks`, …), and `net`/`http` servers over a host-provided socket. The `20-net` build also connects out (`net.connect`, `http.request`, `fetch`) on a host with wasmrun's socket extensions |
+| **swc** | 73 | ~3.5 MB | 🚧 Alpha | TypeScript → JavaScript transpiler (tool, not a language runtime): strips types, lowers TSX and ES modules to CommonJS for the Node.js runtime. Held to the WASM features wasmrun's interpreter runs |
 | **Python** | — | — | 🔜 Coming Soon | — |
 | **Ruby** | — | — | 🔜 Coming Soon | — |
 | **PHP** | — | — | 🔜 Coming Soon | — |

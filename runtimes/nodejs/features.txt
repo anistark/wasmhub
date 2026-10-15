@@ -58,3 +58,19 @@ http-server
 https-stub
 dgram-stub
 tls-stub
+
+# Native hashing (md5, sha1, sha224, sha256, sha384, sha512) in C, HMAC and
+# PBKDF2 over it, and subtle.digest.
+native-hashes
+pbkdf2
+# AsyncLocalStorage and AsyncResource, carried across awaits by the engine.
+async-hooks
+# process.memoryUsage(), uptime(), hrtime.bigint() and 'beforeExit'.
+process-metrics
+before-exit
+# package.json "imports" (#name specifiers).
+package-imports
+# Headers, Request, Response, AbortController, EventTarget as globals. fetch
+# itself needs outbound connect, so it is in features-net.txt.
+web-fetch-types
+abort-controller

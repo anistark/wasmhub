@@ -23,10 +23,11 @@ const net = require('node:net');
 
 console.log(`net.isIP=${net.isIP('127.0.0.1')},${net.isIP('::1')},${net.isIP('nope')}`);
 
-// The client half cannot work on Preview 1; it must say so rather than hang.
+// Without outbound sockets the client half must say so rather than hang. The
+// -net build connects instead, and a destination the host never allowed comes
+// back as an 'error' event; either way it must not take the server down.
 try {
-    net.connect(80, 'example.test');
-    console.log('connect=UNEXPECTEDLY-OK');
+    net.connect(80, 'example.test').on('error', (err) => console.log(`connect=${err.code}`));
 } catch (err) {
     console.log(`connect=${err.code}`);
 }

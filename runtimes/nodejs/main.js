@@ -4,6 +4,44 @@ import * as os from "os";
 const NODE_COMPAT_VERSION = "20";
 const ENGINE = "QuickJS";
 
+// ═══ Async context ═══════════════════════════════════════════════════════════
+// The value AsyncLocalStorage keeps its stores in: undefined, or a Map from
+// each storage to its store. The engine patch carries it across promise
+// reactions (captured where a reaction is registered, so it survives an
+// await); timers and sockets carry it here, by running their callbacks under
+// the context they were created in. Without the patch (the node test harness)
+// it is a plain variable and only holds within synchronous code.
+
+const HAS_ASYNC_CONTEXT = typeof os.getAsyncContext === "function";
+let _fallbackAsyncContext;
+
+function _getAsyncContext() {
+    return HAS_ASYNC_CONTEXT ? os.getAsyncContext() : _fallbackAsyncContext;
+}
+
+function _setAsyncContext(value) {
+    if (HAS_ASYNC_CONTEXT) os.setAsyncContext(value);
+    else _fallbackAsyncContext = value;
+}
+
+function _runInAsyncContext(context, fn, thisArg, args) {
+    const prev = _getAsyncContext();
+    _setAsyncContext(context);
+    try {
+        return fn.apply(thisArg, args);
+    } finally {
+        _setAsyncContext(prev);
+    }
+}
+
+/// `fn` bound to the current context. Unchanged when there is none, which is
+/// the common case and keeps timers free of a wrapper nobody needs.
+function _bindAsyncContext(fn) {
+    const context = _getAsyncContext();
+    if (context === undefined) return fn;
+    return function (...args) { return _runInAsyncContext(context, fn, this, args); };
+}
+
 // ═══ path module ═════════════════════════════════════════════════════════════
 
 const path = {
@@ -2083,16 +2121,432 @@ function structuredCloneImpl(value, options) {
     return clone(value);
 }
 
-// ═══ fetch (unsupported — clear error instead of ReferenceError) ══════════════
+// ═══ Event, EventTarget, AbortController ═════════════════════════════════════
+// The DOM shapes node ships as globals. fetch takes an AbortSignal, and a good
+// deal of library code reaches for AbortController whether or not it fetches.
+
+class Event {
+    constructor(type, init) {
+        const opts = init || {};
+        this.type = String(type);
+        this.bubbles = !!opts.bubbles;
+        this.cancelable = !!opts.cancelable;
+        this.composed = !!opts.composed;
+        this.defaultPrevented = false;
+        this.timeStamp = Date.now();
+        this.target = null;
+        this.currentTarget = null;
+        this._stopped = false;
+    }
+    preventDefault() { if (this.cancelable) this.defaultPrevented = true; }
+    stopPropagation() {}
+    stopImmediatePropagation() { this._stopped = true; }
+}
+
+class EventTarget {
+    constructor() { this._eventListeners = new Map(); }
+    addEventListener(type, listener, options) {
+        if (!listener) return;
+        const once = typeof options === 'object' && options !== null && !!options.once;
+        const list = this._eventListeners.get(type) || [];
+        if (list.some(e => e.listener === listener)) return;
+        list.push({ listener, once });
+        this._eventListeners.set(type, list);
+        const signal = typeof options === 'object' && options !== null ? options.signal : null;
+        if (signal) signal.addEventListener('abort', () => this.removeEventListener(type, listener), { once: true });
+    }
+    removeEventListener(type, listener) {
+        const list = this._eventListeners.get(type);
+        if (!list) return;
+        const i = list.findIndex(e => e.listener === listener);
+        if (i >= 0) list.splice(i, 1);
+    }
+    dispatchEvent(event) {
+        event.target = this;
+        event.currentTarget = this;
+        const handler = this['on' + event.type];
+        if (typeof handler === 'function') handler.call(this, event);
+        for (const entry of (this._eventListeners.get(event.type) || []).slice()) {
+            if (event._stopped) break;
+            if (entry.once) this.removeEventListener(event.type, entry.listener);
+            if (typeof entry.listener === 'function') entry.listener.call(this, event);
+            else if (entry.listener && typeof entry.listener.handleEvent === 'function') entry.listener.handleEvent(event);
+        }
+        event.currentTarget = null;
+        return !event.defaultPrevented;
+    }
+}
+
+class AbortSignal extends EventTarget {
+    constructor() {
+        super();
+        this.aborted = false;
+        this.reason = undefined;
+        this.onabort = null;
+    }
+    throwIfAborted() { if (this.aborted) throw this.reason; }
+    _abort(reason) {
+        if (this.aborted) return;
+        this.aborted = true;
+        this.reason = reason === undefined ? namedError('AbortError', 'This operation was aborted') : reason;
+        this.dispatchEvent(new Event('abort'));
+    }
+    static abort(reason) {
+        const signal = new AbortSignal();
+        signal._abort(reason);
+        return signal;
+    }
+    // Unlike node's, the timer keeps the process alive until it fires: the
+    // engine's timers cannot be unref'd.
+    static timeout(ms) {
+        const signal = new AbortSignal();
+        _setTimeout(() => signal._abort(namedError('TimeoutError', 'The operation was aborted due to timeout')), ms);
+        return signal;
+    }
+    static any(signals) {
+        const signal = new AbortSignal();
+        for (const s of signals) {
+            if (s.aborted) { signal._abort(s.reason); return signal; }
+        }
+        for (const s of signals) s.addEventListener('abort', () => signal._abort(s.reason), { once: true });
+        return signal;
+    }
+}
+
+class AbortController {
+    constructor() { this.signal = new AbortSignal(); }
+    abort(reason) { this.signal._abort(reason); }
+}
+
+// ═══ fetch ════════════════════════════════════════════════════════════════════
+// Headers, Request and Response, and fetch over the http client, so it exists
+// only in the -net build; elsewhere fetch rejects saying why. Bodies are
+// buffered whole: fetch resolves once the response has been read, and
+// Response#body is a one-chunk stream over the buffer, so a server-sent event
+// stream that never ends never resolves. http: only, since no TLS library is
+// linked in.
+
+function headerName(name) {
+    const n = String(name);
+    if (!TOKEN.test(n)) throw new TypeError(`Header name must be a valid HTTP token ["${n}"]`);
+    return n.toLowerCase();
+}
+
+class Headers {
+    constructor(init) {
+        this._map = new Map();
+        if (init instanceof Headers) {
+            for (const [k, list] of init._map) this._map.set(k, list.slice());
+        } else if (Array.isArray(init) || (init && typeof init[Symbol.iterator] === 'function')) {
+            for (const pair of init) {
+                if (pair.length !== 2) throw new TypeError('Headers: each header pair must have exactly two items');
+                this.append(pair[0], pair[1]);
+            }
+        } else if (init && typeof init === 'object') {
+            for (const key of Object.keys(init)) this.append(key, init[key]);
+        }
+    }
+    append(name, value) {
+        const key = headerName(name);
+        const list = this._map.get(key) || [];
+        list.push(String(value).trim());
+        this._map.set(key, list);
+    }
+    set(name, value) { this._map.set(headerName(name), [String(value).trim()]); }
+    get(name) {
+        const list = this._map.get(headerName(name));
+        return list ? list.join(', ') : null;
+    }
+    getSetCookie() { return (this._map.get('set-cookie') || []).slice(); }
+    has(name) { return this._map.has(headerName(name)); }
+    delete(name) { this._map.delete(headerName(name)); }
+    forEach(callback, thisArg) {
+        for (const [k, v] of this.entries()) callback.call(thisArg, v, k, this);
+    }
+    *entries() {
+        for (const key of Array.from(this._map.keys()).sort()) {
+            if (key === 'set-cookie') for (const v of this._map.get(key)) yield [key, v];
+            else yield [key, this._map.get(key).join(', ')];
+        }
+    }
+    *keys() { for (const [k] of this.entries()) yield k; }
+    *values() { for (const [, v] of this.entries()) yield v; }
+    [Symbol.iterator]() { return this.entries(); }
+}
+
+/// [bytes, content type] for anything a fetch body may be.
+function extractBody(body) {
+    if (body === undefined || body === null) return [null, null];
+    if (typeof body === 'string') return [new Uint8Array(Buffer.from(body, 'utf8')), 'text/plain;charset=UTF-8'];
+    if (body instanceof URLSearchParams) {
+        return [new Uint8Array(Buffer.from(body.toString(), 'utf8')), 'application/x-www-form-urlencoded;charset=UTF-8'];
+    }
+    if (body instanceof ArrayBuffer) return [new Uint8Array(body.slice(0)), null];
+    if (ArrayBuffer.isView(body)) {
+        return [new Uint8Array(body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength)), null];
+    }
+    return [new Uint8Array(Buffer.from(String(body), 'utf8')), 'text/plain;charset=UTF-8'];
+}
+
+function bodyUnusable() {
+    return new TypeError('Body is unusable: Body has already been read');
+}
+
+/// The body readers Request and Response share.
+class BodyMixin {
+    _initBody(bytes) {
+        this._bytes = bytes;
+        this.bodyUsed = false;
+    }
+    _consume() {
+        if (this.bodyUsed) return Promise.reject(bodyUnusable());
+        this.bodyUsed = true;
+        return Promise.resolve(this._bytes || new Uint8Array(0));
+    }
+    get body() {
+        if (this._bytes === null) return null;
+        const self = this;
+        let done = false;
+        const reader = {
+            read() {
+                if (done || self.bodyUsed) return Promise.resolve({ done: true, value: undefined });
+                done = true;
+                self.bodyUsed = true;
+                return Promise.resolve({ done: false, value: self._bytes });
+            },
+            releaseLock() {},
+            cancel() { done = true; return Promise.resolve(); },
+            closed: Promise.resolve(),
+        };
+        return {
+            locked: false,
+            getReader() { return reader; },
+            cancel() { done = true; return Promise.resolve(); },
+            [Symbol.asyncIterator]() {
+                return { next: () => reader.read(), return: () => Promise.resolve({ done: true, value: undefined }) };
+            },
+        };
+    }
+    arrayBuffer() {
+        return this._consume().then(b => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+    }
+    bytes() { return this._consume().then(b => new Uint8Array(b)); }
+    text() { return this._consume().then(b => Buffer.from(b).toString('utf8')); }
+    json() { return this.text().then(t => JSON.parse(t)); }
+    blob() { return Promise.reject(new TypeError('Body.blob(): Blob is not available in this runtime')); }
+    formData() { return Promise.reject(new TypeError('Body.formData(): FormData is not available in this runtime')); }
+}
+
+class Request extends BodyMixin {
+    constructor(input, init) {
+        super();
+        const opts = init || {};
+        const from = input instanceof Request ? input : null;
+        this.url = from ? from.url : new URL(String(input)).href;
+        this.method = String(opts.method || (from ? from.method : 'GET')).toUpperCase();
+        this.headers = new Headers(opts.headers || (from ? from.headers : undefined));
+        this.redirect = opts.redirect || (from ? from.redirect : 'follow');
+        this.signal = opts.signal || (from ? from.signal : new AbortSignal());
+        this.credentials = 'same-origin';
+        this.mode = 'cors';
+        this.cache = 'default';
+        this.referrer = 'about:client';
+        let bytes = from ? from._bytes : null;
+        if (opts.body !== undefined && opts.body !== null) {
+            if (this.method === 'GET' || this.method === 'HEAD') {
+                throw new TypeError('Request with GET/HEAD method cannot have body.');
+            }
+            const [b, type] = extractBody(opts.body);
+            bytes = b;
+            if (type && !this.headers.has('content-type')) this.headers.set('content-type', type);
+        }
+        this._initBody(bytes);
+    }
+    clone() {
+        if (this.bodyUsed) throw bodyUnusable();
+        return new Request(this);
+    }
+}
+
+class Response extends BodyMixin {
+    constructor(body, init) {
+        super();
+        const opts = init || {};
+        const status = opts.status === undefined ? 200 : Number(opts.status);
+        if (!Number.isInteger(status) || status < 200 || status > 599) {
+            throw new RangeError(`init["status"] must be in the range of 200 to 599, inclusive.`);
+        }
+        this.status = status;
+        this.statusText = opts.statusText === undefined ? '' : String(opts.statusText);
+        this.headers = new Headers(opts.headers);
+        this.type = 'default';
+        this.url = '';
+        this.redirected = false;
+        const [bytes, type] = extractBody(body);
+        if (type && !this.headers.has('content-type')) this.headers.set('content-type', type);
+        this._initBody(bytes);
+    }
+    get ok() { return this.status >= 200 && this.status < 300; }
+    clone() {
+        if (this.bodyUsed) throw bodyUnusable();
+        const r = new Response(this._bytes, { status: this.status, statusText: this.statusText, headers: this.headers });
+        r.type = this.type;
+        r.url = this.url;
+        r.redirected = this.redirected;
+        return r;
+    }
+    static json(data, init) {
+        const opts = Object.assign({}, init);
+        const headers = new Headers(opts.headers);
+        if (!headers.has('content-type')) headers.set('content-type', 'application/json');
+        opts.headers = headers;
+        return new Response(JSON.stringify(data), opts);
+    }
+    static error() {
+        const r = new Response(null, { status: 200 });
+        r.status = 0;
+        r.type = 'error';
+        return r;
+    }
+    static redirect(url, status) {
+        const code = status === undefined ? 302 : status;
+        if (![301, 302, 303, 307, 308].includes(code)) throw new RangeError(`Invalid status code ${code}`);
+        return new Response(null, { status: code, headers: { location: new URL(String(url)).href } });
+    }
+}
+
+function fetchFailed(cause) {
+    const e = new TypeError('fetch failed');
+    e.cause = cause;
+    return e;
+}
 
 function fetchUnsupported() {
     const e = new TypeError(
-        'fetch: network access is not supported in this WASI runtime yet — ' +
-        'the sandbox has no socket syscalls. HTTP requests from sandboxed code ' +
-        'arrive with the wasmnet networking milestone.'
+        'fetch: network access is not supported in this build: WASI Preview 1 has no ' +
+        'outbound connect. The nodejs-20-net build has one, on a host that provides ' +
+        'the sock_open/sock_connect extensions (wasmrun).'
     );
     e.code = 'ERR_NETWORK_UNSUPPORTED';
     return Promise.reject(e);
+}
+
+function fetchImpl(input, init) {
+    return new Promise((resolve, reject) => {
+        let request;
+        try {
+            request = new Request(input, init);
+        } catch (e) {
+            reject(e);
+            return;
+        }
+        const signal = request.signal;
+        if (signal.aborted) { reject(signal.reason); return; }
+
+        let settled = false;
+        let current = null;
+        const fail = (err) => {
+            if (settled) return;
+            settled = true;
+            if (current) current.destroy();
+            reject(err);
+        };
+        const onAbort = () => fail(signal.reason);
+        signal.addEventListener('abort', onAbort, { once: true });
+
+        let url = request.url;
+        let method = request.method;
+        let body = request._bytes;
+        const headers = new Headers(request.headers);
+        if (!headers.has('accept')) headers.set('accept', '*/*');
+        if (!headers.has('accept-language')) headers.set('accept-language', '*');
+        if (!headers.has('user-agent')) headers.set('user-agent', 'node');
+        let redirects = 0;
+
+        const send = () => {
+            const u = new URL(url);
+            if (u.protocol === 'https:') {
+                const cause = new Error('https is not available: no TLS library is linked into the runtime');
+                cause.code = 'ERR_NOT_SUPPORTED';
+                fail(fetchFailed(cause));
+                return;
+            }
+            if (u.protocol !== 'http:') {
+                fail(fetchFailed(new Error(`unsupported URL scheme '${u.protocol}'`)));
+                return;
+            }
+            const out = {};
+            for (const [k, v] of headers) {
+                if (out[k] === undefined) out[k] = v;
+                else out[k] = [].concat(out[k], v);
+            }
+            if (body) out['content-length'] = String(body.length);
+            let req;
+            try {
+                req = httpRequest({
+                    protocol: 'http:',
+                    hostname: u.hostname.startsWith('[') ? u.hostname.slice(1, -1) : u.hostname,
+                    port: u.port ? Number(u.port) : 80,
+                    path: (u.pathname || '/') + u.search,
+                    method,
+                    headers: out,
+                });
+            } catch (e) {
+                fail(fetchFailed(e));
+                return;
+            }
+            current = req;
+            req.on('error', (e) => fail(fetchFailed(e)));
+            req.on('response', (res) => {
+                const status = res.statusCode;
+                const location = res.headers.location;
+                if ([301, 302, 303, 307, 308].includes(status) && location && request.redirect !== 'manual') {
+                    res.resume();
+                    if (request.redirect === 'error') {
+                        fail(fetchFailed(new Error('unexpected redirect')));
+                        return;
+                    }
+                    if (++redirects > 20) {
+                        fail(fetchFailed(new Error('redirect count exceeded')));
+                        return;
+                    }
+                    url = new URL(location, url).href;
+                    if ((status === 303 && method !== 'HEAD') || ((status === 301 || status === 302) && method === 'POST')) {
+                        method = 'GET';
+                        body = null;
+                        for (const h of ['content-type', 'content-length', 'content-encoding', 'content-language', 'content-location']) {
+                            headers.delete(h);
+                        }
+                    }
+                    send();
+                    return;
+                }
+                const chunks = [];
+                res.on('data', (c) => chunks.push(c));
+                res.on('error', (e) => fail(fetchFailed(e)));
+                res.on('end', () => {
+                    if (settled) return;
+                    settled = true;
+                    signal.removeEventListener('abort', onAbort);
+                    const responseHeaders = new Headers();
+                    for (let i = 0; i + 1 < res.rawHeaders.length; i += 2) {
+                        responseHeaders.append(res.rawHeaders[i], res.rawHeaders[i + 1]);
+                    }
+                    const response = new Response(null, { status: 200, headers: responseHeaders });
+                    response.status = status;
+                    response.statusText = res.statusMessage || '';
+                    response.type = 'basic';
+                    response.url = url;
+                    response.redirected = redirects > 0;
+                    response._initBody(method === 'HEAD' || status === 204 || status === 304 ? null : new Uint8Array(Buffer.concat(chunks)));
+                    resolve(response);
+                });
+            });
+            if (body) req.end(Buffer.from(body));
+            else req.end();
+        };
+        send();
+    });
 }
 
 function installWebGlobals() {
@@ -2100,7 +2554,14 @@ function installWebGlobals() {
     globalThis.URLSearchParams = URLSearchParams;
     globalThis.crypto = webCrypto;
     globalThis.structuredClone = structuredCloneImpl;
-    globalThis.fetch = fetchUnsupported;
+    globalThis.fetch = HAS_OUTBOUND ? fetchImpl : fetchUnsupported;
+    globalThis.Headers = Headers;
+    globalThis.Request = Request;
+    globalThis.Response = Response;
+    globalThis.Event = Event;
+    globalThis.EventTarget = EventTarget;
+    globalThis.AbortController = AbortController;
+    globalThis.AbortSignal = AbortSignal;
 }
 
 // ═══ querystring ══════════════════════════════════════════════════════════════
@@ -2449,11 +2910,23 @@ function md5(bytes) {
     return out;
 }
 
+// The pure-JS hashes above are the fallback for a build without the native
+// ones in runtimes/nodejs/hash.c, which is only the node test harness: under
+// wasmrun's interpreter they cost about 1.5 s per 64-byte block.
+const HAS_NATIVE_HASH = typeof os.hashInit === "function";
+
 const HASH_ALGORITHMS = {
-    sha256: { fn: sha256, blockSize: 64 },
-    sha1: { fn: sha1, blockSize: 64 },
-    md5: { fn: md5, blockSize: 64 },
+    md5: { fn: md5, blockSize: 64, size: 16 },
+    sha1: { fn: sha1, blockSize: 64, size: 20 },
+    sha224: { blockSize: 64, size: 28, native: true },
+    sha256: { fn: sha256, blockSize: 64, size: 32 },
+    sha384: { blockSize: 128, size: 48, native: true },
+    sha512: { blockSize: 128, size: 64, native: true },
 };
+
+function availableHashes() {
+    return Object.keys(HASH_ALGORITHMS).filter(k => HAS_NATIVE_HASH || !HASH_ALGORITHMS[k].native);
+}
 
 // ═══ crypto module ════════════════════════════════════════════════════════════
 
@@ -2467,74 +2940,161 @@ function toBytes(data, encoding) {
 
 function digestTo(bytes, encoding) {
     const buf = Buffer.from(bytes);
-    return encoding ? buf.toString(encoding) : buf;
+    return encoding && encoding !== 'buffer' ? buf.toString(encoding) : buf;
 }
 
+/// The canonical name ("sha256") for any spelling node accepts ("SHA-256",
+/// "RSA-SHA256"), or an ERR_CRYPTO_INVALID_DIGEST error.
 function resolveAlgorithm(algorithm) {
-    const key = String(algorithm).toLowerCase().replace(/-/g, '');
+    const key = String(algorithm).toLowerCase().replace(/^rsa-/, '').replace(/-/g, '');
     const spec = HASH_ALGORITHMS[key];
-    if (!spec) {
+    if (!spec || (spec.native && !HAS_NATIVE_HASH)) {
         const e = new Error(
-            `Digest method '${algorithm}' is not supported; available: ${Object.keys(HASH_ALGORITHMS).join(', ')}`
+            `Digest method '${algorithm}' is not supported; available: ${availableHashes().join(', ')}`
         );
         e.code = 'ERR_CRYPTO_INVALID_DIGEST';
         throw e;
     }
-    return spec;
+    return key;
+}
+
+function hashFinalized() {
+    const e = new Error('Digest already called');
+    e.code = 'ERR_CRYPTO_HASH_FINALIZED';
+    return e;
 }
 
 class Hash {
-    constructor(algorithm) {
-        this._spec = resolveAlgorithm(algorithm);
-        this._chunks = [];
+    constructor(algorithm, _from) {
+        this._alg = _from ? _from._alg : resolveAlgorithm(algorithm);
+        this._done = false;
+        if (HAS_NATIVE_HASH) {
+            // An ArrayBuffer holding the C state: copied with a slice.
+            this._state = _from ? _from._state.slice(0) : os.hashInit(this._alg);
+        } else {
+            this._chunks = _from ? _from._chunks.slice() : [];
+        }
     }
     update(data, encoding) {
-        this._chunks.push(toBytes(data, encoding));
+        if (this._done) throw hashFinalized();
+        const bytes = toBytes(data, encoding);
+        if (this._state) os.hashUpdate(this._state, bytes.buffer, bytes.byteOffset, bytes.byteLength);
+        // Copied: the caller may reuse the buffer before digest().
+        else this._chunks.push(new Uint8Array(bytes));
         return this;
     }
     digest(encoding) {
+        if (this._done) throw hashFinalized();
+        this._done = true;
+        if (this._state) return digestTo(new Uint8Array(os.hashDigest(this._state)), encoding);
         let total = 0;
         for (const c of this._chunks) total += c.length;
         const all = new Uint8Array(total);
         let at = 0;
         for (const c of this._chunks) { all.set(c, at); at += c.length; }
-        return digestTo(this._spec.fn(all), encoding);
+        return digestTo(HASH_ALGORITHMS[this._alg].fn(all), encoding);
+    }
+    copy() {
+        if (this._done) throw hashFinalized();
+        return new Hash(null, this);
     }
 }
 
+/// HMAC (RFC 2104) over Hash, so it uses the native digests when they are
+/// there. The keyed inner state is built once; _clone() reuses it, which is
+/// what keeps pbkdf2's thousands of HMACs to two compressions each.
 class Hmac {
-    constructor(algorithm, key) {
-        this._spec = resolveAlgorithm(algorithm);
-        const block = this._spec.blockSize;
-        let k = toBytes(key);
-        if (k.length > block) k = this._spec.fn(k);
-        const padded = new Uint8Array(block);
-        padded.set(k, 0);
-        this._outer = new Uint8Array(block);
-        this._inner = new Uint8Array(block);
-        for (let i = 0; i < block; i++) {
-            this._outer[i] = padded[i] ^ 0x5c;
-            this._inner[i] = padded[i] ^ 0x36;
+    constructor(algorithm, key, _from) {
+        if (_from) {
+            this._alg = _from._alg;
+            this._opad = _from._opad;
+            this._inner = _from._inner.copy();
+            this._done = false;
+            return;
         }
-        this._chunks = [this._inner];
+        this._alg = resolveAlgorithm(algorithm);
+        const block = HASH_ALGORITHMS[this._alg].blockSize;
+        let k = key instanceof KeyObject ? key._key : toBytes(key);
+        if (k.length > block) k = new Hash(this._alg).update(k).digest();
+        const ipad = new Uint8Array(block);
+        this._opad = new Uint8Array(block);
+        for (let i = 0; i < block; i++) {
+            const b = i < k.length ? k[i] : 0;
+            ipad[i] = b ^ 0x36;
+            this._opad[i] = b ^ 0x5c;
+        }
+        this._inner = new Hash(this._alg).update(ipad);
+        this._done = false;
     }
     update(data, encoding) {
-        this._chunks.push(toBytes(data, encoding));
+        if (this._done) throw hashFinalized();
+        this._inner.update(data, encoding);
         return this;
     }
     digest(encoding) {
-        let total = 0;
-        for (const c of this._chunks) total += c.length;
-        const all = new Uint8Array(total);
-        let at = 0;
-        for (const c of this._chunks) { all.set(c, at); at += c.length; }
-        const innerDigest = this._spec.fn(all);
-        const outer = new Uint8Array(this._outer.length + innerDigest.length);
-        outer.set(this._outer, 0);
-        outer.set(innerDigest, this._outer.length);
-        return digestTo(this._spec.fn(outer), encoding);
+        if (this._done) throw hashFinalized();
+        this._done = true;
+        const inner = this._inner.digest();
+        return digestTo(new Hash(this._alg).update(this._opad).update(inner).digest(), encoding);
     }
+    _clone() { return new Hmac(null, null, this); }
 }
+
+/// Just enough of node's KeyObject for createSecretKey to feed createHmac.
+class KeyObject {
+    constructor(bytes) {
+        this._key = bytes;
+        this.type = 'secret';
+        this.symmetricKeySize = bytes.length;
+    }
+    export() { return Buffer.from(this._key); }
+}
+
+function pbkdf2Sync(password, salt, iterations, keylen, digest) {
+    if (typeof digest !== 'string') {
+        const e = new TypeError('The "digest" argument must be of type string');
+        e.code = 'ERR_INVALID_ARG_TYPE';
+        throw e;
+    }
+    if (!Number.isInteger(iterations) || iterations < 1) {
+        throw new RangeError(`The value of "iterations" is out of range. It must be >= 1. Received ${iterations}`);
+    }
+    if (!Number.isInteger(keylen) || keylen < 0) {
+        throw new RangeError(`The value of "keylen" is out of range. It must be >= 0. Received ${keylen}`);
+    }
+    const keyed = new Hmac(digest, password);
+    const size = HASH_ALGORITHMS[keyed._alg].size;
+    const saltBytes = toBytes(salt);
+    const out = Buffer.alloc(keylen);
+    const index = new Uint8Array(4);
+    for (let block = 1, at = 0; at < keylen; block++, at += size) {
+        new DataView(index.buffer).setUint32(0, block, false);
+        let u = keyed._clone().update(saltBytes).update(index).digest();
+        const t = new Uint8Array(u);
+        for (let i = 1; i < iterations; i++) {
+            u = keyed._clone().update(u).digest();
+            for (let j = 0; j < size; j++) t[j] ^= u[j];
+        }
+        out.set(t.subarray(0, Math.min(size, keylen - at)), at);
+    }
+    return out;
+}
+
+const SUBTLE_DIGESTS = { 'SHA-1': 'sha1', 'SHA-256': 'sha256', 'SHA-384': 'sha384', 'SHA-512': 'sha512' };
+
+webCrypto.subtle = {
+    digest(algorithm, data) {
+        try {
+            const name = typeof algorithm === 'string' ? algorithm : algorithm && algorithm.name;
+            const alg = SUBTLE_DIGESTS[String(name).toUpperCase()];
+            if (!alg) throw namedError('NotSupportedError', `Unrecognized algorithm name: ${name}`);
+            const bytes = new Hash(alg).update(toBytes(data)).digest();
+            return Promise.resolve(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.length));
+        } catch (e) {
+            return Promise.reject(e);
+        }
+    },
+};
 
 const nodeCrypto = {
     webcrypto: webCrypto,
@@ -2575,6 +3135,23 @@ const nodeCrypto = {
 
     createHash(algorithm) { return new Hash(algorithm); },
     createHmac(algorithm, key) { return new Hmac(algorithm, key); },
+    createSecretKey(key, encoding) { return new KeyObject(new Uint8Array(toBytes(key, encoding))); },
+
+    hash(algorithm, data, outputEncoding = 'hex') {
+        return new Hash(algorithm).update(data).digest(outputEncoding);
+    },
+
+    pbkdf2Sync,
+    pbkdf2(password, salt, iterations, keylen, digest, callback) {
+        if (typeof callback !== 'function') throw new TypeError('The "callback" argument must be of type function');
+        // Computed after the current tick, as node's thread pool would.
+        _setTimeout(() => {
+            let key;
+            try { key = pbkdf2Sync(password, salt, iterations, keylen, digest); }
+            catch (e) { callback(e); return; }
+            callback(null, key);
+        }, 0);
+    },
 
     timingSafeEqual(a, b) {
         const x = toBytes(a);
@@ -2585,10 +3162,11 @@ const nodeCrypto = {
         return diff === 0;
     },
 
-    getHashes() { return Object.keys(HASH_ALGORITHMS); },
+    getHashes() { return availableHashes(); },
 
     Hash,
     Hmac,
+    KeyObject,
 };
 
 // ═══ fs/promises ══════════════════════════════════════════════════════════════
@@ -2987,7 +3565,7 @@ const nodeTest = Object.assign(test, {
     afterEach(fn) { _currentSuite().hooks.afterEach.push(fn); },
 });
 
-// ═══ net (inbound, over WASI Preview 1 sockets) ═══════════════════════════════
+// ═══ net (over WASI Preview 1 sockets) ════════════════════════════════════════
 // Preview 1 can accept, read, write and shut down a socket, but it cannot
 // create one: sock_open/bind/connect/listen are WASIX-style extensions that a
 // stock host does not implement, and a WASM import is not optional -- declaring
@@ -2999,8 +3577,12 @@ const nodeTest = Object.assign(test, {
 //   WASMHUB_LISTEN_ADDR  optional "host:port" it is bound to, so that
 //                        server.address() can answer truthfully
 //
-// which is the shape `wasmtime run --tcplisten` already uses. Outbound connect
-// is reported as unsupported rather than faked.
+// which is the shape `wasmtime run --tcplisten` already uses.
+//
+// Outbound connect is in the nodejs-20-net build only, which imports wasmrun's
+// sock_open/sock_connect extensions (see wasi_sockets.c) and so has an
+// os.sockConnect. Without it, connecting reports itself unsupported rather
+// than being faked.
 //
 // The engine runs to completion inside one host call and exposes no readiness
 // primitive, so every socket is non-blocking and a self-scheduling timer drains
@@ -3008,6 +3590,7 @@ const nodeTest = Object.assign(test, {
 // which is what lets a script that used a socket still exit on its own.
 
 const HAS_SOCKETS = typeof os.sockAccept === "function" && typeof os.setTimeout === "function";
+const HAS_OUTBOUND = HAS_SOCKETS && typeof os.sockConnect === "function";
 
 const SOCK_CHUNK = 65536;
 // Reads land here first and are copied out, so one buffer serves every socket.
@@ -3029,10 +3612,45 @@ function outboundUnsupported(api) {
     const e = new Error(
         `${api} is not supported in this sandbox: WASI Preview 1 has no outbound ` +
         `connect (sock_open, sock_bind and sock_connect are host extensions), so ` +
-        `this runtime can serve connections but cannot open them.`
+        `this build can serve connections but cannot open them. The nodejs-20-net ` +
+        `build can, on a host that provides those extensions (wasmrun).`
     );
     e.code = 'ERR_NOT_SUPPORTED';
     return e;
+}
+
+/// What a refused connect means, since the host keeps its reason to itself.
+const CONNECT_ERRORS = {
+    EACCES: "the host's network policy does not allow this destination",
+    ENOSYS: 'the host does not implement outbound sockets',
+    EIO: 'the host could not resolve or reach the destination',
+};
+
+function connectError(code, host, port) {
+    const e = sockError(code, 'connect', `${host}:${port}${CONNECT_ERRORS[code] ? ` (${CONNECT_ERRORS[code]})` : ''}`);
+    e.address = host;
+    e.port = port;
+    return e;
+}
+
+/// net.connect's overloads: (port[, host][, listener]), (options[, listener])
+/// and (path[, listener]), as [options, listener].
+function normalizeConnectArgs(args) {
+    let options;
+    let i = 0;
+    if (args[0] !== null && typeof args[0] === 'object') {
+        options = Object.assign({}, args[0]);
+        i = 1;
+    } else if (typeof args[0] === 'string' && !/^\d+$/.test(args[0])) {
+        options = { path: args[0] };
+        i = 1;
+    } else {
+        options = { port: args[0] };
+        i = 1;
+        if (typeof args[1] === 'string') { options.host = args[1]; i = 2; }
+    }
+    const listener = typeof args[i] === 'function' ? args[i] : null;
+    return [options, listener];
 }
 
 // ── Poll loop ────────────────────────────────────────────────────────────────
@@ -3060,8 +3678,12 @@ function pollTick() {
     _sockPoll.timer = null;
     let moved = 0;
     // Copied, because accepting or reading can add to and remove from both sets.
-    for (const server of Array.from(_sockPoll.listeners)) moved += server._acceptPending();
-    for (const socket of Array.from(_sockPoll.sockets)) moved += socket._pump();
+    for (const server of Array.from(_sockPoll.listeners)) {
+        moved += _runInAsyncContext(server._asyncContext, server._acceptPending, server, []);
+    }
+    for (const socket of Array.from(_sockPoll.sockets)) {
+        moved += _runInAsyncContext(socket._asyncContext, socket._pump, socket, []);
+    }
     _sockPoll.step = moved > 0 ? 0 : Math.min(_sockPoll.step + 1, SOCK_BACKOFF.length - 1);
     pollSchedule();
 }
@@ -3074,6 +3696,9 @@ class Socket extends Duplex {
         const opts = options || {};
         this._fd = -1;
         this._server = null;
+        // Its events run in the context it was created in, as node's do.
+        this._asyncContext = _getAsyncContext();
+        this._idle = { ms: 0, last: 0 };
         this._sockState = {
             writeQueue: [],
             finalCallback: null,
@@ -3103,7 +3728,58 @@ class Socket extends Duplex {
         return this;
     }
 
-    connect() { throw outboundUnsupported('net.Socket.connect'); }
+    connect(...args) {
+        if (!HAS_OUTBOUND) throw outboundUnsupported('net.Socket.connect');
+        const [options, listener] = normalizeConnectArgs(args);
+        if (listener) this.once('connect', listener);
+        if (options.timeout) this.setTimeout(options.timeout);
+
+        if (options.path !== undefined) {
+            const e = sockError('ERR_NOT_SUPPORTED', 'connect', 'Unix domain sockets are not available in the sandbox');
+            process.nextTick(() => this.destroy(e));
+            return this;
+        }
+        const port = Number(options.port);
+        if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+            const e = new RangeError(`Port should be > 0 and < 65536. Received ${options.port}.`);
+            e.code = 'ERR_SOCKET_BAD_PORT';
+            throw e;
+        }
+        const host = options.host || options.hostname || 'localhost';
+
+        this.connecting = true;
+        // sock_connect blocks until the host answers, so it runs from a timer:
+        // never inside the call that asked for it, and only once the caller
+        // has had the chance to attach 'connect' and 'error' listeners.
+        _setTimeout(() => {
+            if (this._sockState.destroyed) return;
+            const [fd, err] = os.sockConnect(host, port);
+            this.connecting = false;
+            if (err) {
+                this.destroy(connectError(err, host, port));
+                return;
+            }
+            this.remotePort = port;
+            const family = isIPv4(host) ? 'IPv4' : isIPv6(host) ? 'IPv6' : undefined;
+            if (family) {
+                this.remoteAddress = host;
+                this.remoteFamily = family;
+            }
+            this._adopt(fd, null);
+            this.emit('connect');
+            this.emit('ready');
+            this._flushWrites();
+        }, 0);
+        return this;
+    }
+
+    get pending() { return this._fd < 0; }
+    get readyState() {
+        if (this.connecting) return 'opening';
+        if (this._fd < 0) return 'closed';
+        if (this.readable && this.writable) return 'open';
+        return this.readable ? 'readOnly' : 'writeOnly';
+    }
 
     _read() { /* the poll loop pushes; there is nothing to pull on demand */ }
 
@@ -3129,6 +3805,8 @@ class Socket extends Duplex {
     _flushWrites() {
         const st = this._sockState;
         let moved = 0;
+        // Not connected yet: writes wait in the queue until connect() lands.
+        if (this._fd < 0) return 0;
         while (st.writeQueue.length > 0 && !st.destroyed) {
             const item = st.writeQueue[0];
             const remaining = item.buf.length - item.offset;
@@ -3203,7 +3881,17 @@ class Socket extends Duplex {
     _pump() {
         if (this._sockState.destroyed) return 0;
         // Writes first: a response already queued should not wait behind a read.
-        return this._flushWrites() + this._readIncoming();
+        const moved = this._flushWrites() + this._readIncoming();
+        const idle = this._idle;
+        if (idle.ms > 0) {
+            const now = Date.now();
+            if (moved > 0) idle.last = now;
+            else if (now - idle.last >= idle.ms) {
+                idle.last = now;
+                this.emit('timeout');
+            }
+        }
+        return moved;
     }
 
     destroy(err) {
@@ -3221,7 +3909,10 @@ class Socket extends Duplex {
         _sockPoll.sockets.delete(this);
         if (!st.readEnded) {
             st.readEnded = true;
-            this.push(null);
+            // A socket destroyed by an error never ends cleanly: node emits
+            // 'error' and 'close', and an 'end' first would read as the peer
+            // hanging up.
+            if (!err) this.push(null);
         }
         if (err) this.emit('error', err);
         if (this._server) this._server._connectionClosed(this);
@@ -3233,14 +3924,23 @@ class Socket extends Duplex {
         return this._server ? this._server.address() : null;
     }
 
-    // Kept so ordinary server code runs unchanged. Preview 1 exposes no socket
+    // Kept so ordinary code runs unchanged. Preview 1 exposes no socket
     // options, so these record the intent and do nothing else.
     setNoDelay() { return this; }
     setKeepAlive() { return this; }
+
+    // An idle timeout, checked by the poll loop: 'timeout' once the socket has
+    // moved no bytes for `ms`, and again after each further `ms`. 0 disables.
     setTimeout(ms, callback) {
-        if (callback) this.once('timeout', callback);
+        this._idle.ms = ms > 0 ? ms : 0;
+        this._idle.last = Date.now();
+        if (callback) {
+            if (this._idle.ms > 0) this.once('timeout', callback);
+            else this.removeListener('timeout', callback);
+        }
         return this;
     }
+    get timeout() { return this._idle.ms || undefined; }
     ref() { return this; }
     unref() { return this; }
 }
@@ -3306,6 +4006,7 @@ class Server extends EventEmitter {
         this._options = options || {};
         this._fd = -1;
         this._addr = null;
+        this._asyncContext = _getAsyncContext();
         this._closing = false;
         this._connections = new Set();
         this.listening = false;
@@ -3440,22 +4141,28 @@ function isIPv6(s) {
     return compressed.length === 2 ? groups.length < 8 : groups.length === 8;
 }
 
+function netConnect(api, args) {
+    if (!HAS_OUTBOUND) throw outboundUnsupported(api);
+    const [options] = normalizeConnectArgs(args);
+    return new Socket({ allowHalfOpen: !!options.allowHalfOpen }).connect(...args);
+}
+
 const netModule = {
     Server,
     Socket,
     Stream: Socket,
     createServer(options, connectionListener) { return new Server(options, connectionListener); },
-    connect() { throw outboundUnsupported('net.connect'); },
-    createConnection() { throw outboundUnsupported('net.createConnection'); },
+    connect(...args) { return netConnect('net.connect', args); },
+    createConnection(...args) { return netConnect('net.createConnection', args); },
     isIP(s) { return isIPv4(s) ? 4 : isIPv6(s) ? 6 : 0; },
     isIPv4,
     isIPv6,
 };
 
-// ═══ http (server half, over net) ═════════════════════════════════════════════
-// createServer and the request/response cycle, built on the `net` server above.
-// The client half (request/get) needs an outbound connect that Preview 1 cannot
-// express, so it reports that rather than pretending.
+// ═══ http (over net) ═════════════════════════════════════════════════════════
+// createServer and the request/response cycle, built on the `net` server above,
+// and the client half (request/get) over net.connect, which only the -net
+// build has; elsewhere the client reports why it cannot work.
 
 const STATUS_CODES = {
     100: 'Continue', 101: 'Switching Protocols', 102: 'Processing', 103: 'Early Hints',
@@ -3835,6 +4542,456 @@ function attachHttpConnection(server, socket) {
     });
 }
 
+// ── http client ──────────────────────────────────────────────────────────────
+// One connection per request, closed when the response ends (`Connection:
+// close`): there is no pooling, so the Agent is a shape to pass around rather
+// than a socket cache. Framing follows node's choices: a body of known length
+// gets Content-Length, a body streamed with write() is chunked, and the
+// methods node never chunks by default send no body framing when empty.
+
+const NO_DEFAULT_CHUNKING = ['GET', 'HEAD', 'DELETE', 'OPTIONS', 'TRACE', 'CONNECT'];
+const TOKEN = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
+
+class Agent extends EventEmitter {
+    constructor(options) {
+        super();
+        this.options = Object.assign({ path: null }, options);
+        this.keepAlive = false;
+        this.maxSockets = Infinity;
+        this.maxFreeSockets = 256;
+        this.defaultPort = 80;
+        this.protocol = 'http:';
+        this.sockets = Object.create(null);
+        this.freeSockets = Object.create(null);
+        this.requests = Object.create(null);
+    }
+    destroy() {}
+}
+
+const globalAgent = new Agent();
+
+/// http.request's overloads: (url[, options][, callback]) and
+/// (options[, callback]), with url a string or a URL.
+function normalizeRequestArgs(args) {
+    let options = {};
+    let i = 0;
+    if (typeof args[0] === 'string' || args[0] instanceof URL) {
+        const u = typeof args[0] === 'string' ? new URL(args[0]) : args[0];
+        options = {
+            protocol: u.protocol,
+            hostname: u.hostname.startsWith('[') ? u.hostname.slice(1, -1) : u.hostname,
+            port: u.port ? Number(u.port) : undefined,
+            path: (u.pathname || '/') + (u.search || ''),
+            href: u.href,
+        };
+        if (u.username || u.password) {
+            options.auth = `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`;
+        }
+        i = 1;
+    }
+    if (args[i] && typeof args[i] === 'object') {
+        options = Object.assign(options, args[i]);
+        i++;
+    }
+    const callback = typeof args[i] === 'function' ? args[i] : null;
+    return [options, callback];
+}
+
+class ClientRequest extends Writable {
+    constructor(options, callback) {
+        super();
+        if (!HAS_OUTBOUND) throw outboundUnsupported('http.request');
+        const protocol = options.protocol || 'http:';
+        if (protocol !== 'http:') {
+            const e = new TypeError(`Protocol "${protocol}" not supported. Expected "http:"`);
+            e.code = 'ERR_INVALID_PROTOCOL';
+            throw e;
+        }
+        const method = String(options.method || 'GET').toUpperCase();
+        if (!TOKEN.test(method)) {
+            const e = new TypeError(`Method must be a valid HTTP token ["${options.method}"]`);
+            e.code = 'ERR_INVALID_HTTP_TOKEN';
+            throw e;
+        }
+        const path = options.path || '/';
+        if (/[\u0000- ]/.test(path)) {
+            const e = new TypeError('Request path contains unescaped characters');
+            e.code = 'ERR_UNESCAPED_CHARACTERS';
+            throw e;
+        }
+
+        this.method = method;
+        this.path = path;
+        this.protocol = protocol;
+        this.host = options.hostname || (options.host ? String(options.host).replace(/:\d+$/, '') : 'localhost');
+        this.port = Number(options.port || options.defaultPort || 80);
+        this.agent = options.agent === undefined ? globalAgent : options.agent;
+        this.headersSent = false;
+        this.finished = false;
+        this.aborted = false;
+        this.destroyed = false;
+        this.reusedSocket = false;
+        this.res = null;
+        this._headerMap = new Map();
+        this._chunked = false;
+        this._knownLength = null;
+        this._body = null;   // response parser state, once a response starts
+
+        const headers = options.headers;
+        if (Array.isArray(headers)) {
+            for (let i = 0; i + 1 < headers.length; i += 2) this.setHeader(headers[i], headers[i + 1]);
+        } else if (headers) {
+            for (const key of Object.keys(headers)) {
+                if (headers[key] !== undefined) this.setHeader(key, headers[key]);
+            }
+        }
+        if (options.auth && !this.hasHeader('authorization')) {
+            this.setHeader('Authorization', 'Basic ' + Buffer.from(String(options.auth)).toString('base64'));
+        }
+        if (options.setHost !== false && !this.hasHeader('host')) {
+            const name = this.host.includes(':') ? `[${this.host}]` : this.host;
+            this.setHeader('Host', this.port === 80 ? name : `${name}:${this.port}`);
+        }
+
+        if (callback) this.once('response', callback);
+
+        const socket = new Socket({});
+        this.socket = socket;
+        this.connection = socket;
+        socket.on('data', (chunk) => this._onData(chunk));
+        socket.on('end', () => this._onEnd());
+        socket.on('error', (err) => this._onSocketError(err));
+        socket.on('close', () => this._onClose());
+        socket.connect({ host: this.host, port: this.port });
+        process.nextTick(() => this.emit('socket', socket));
+
+        if (options.timeout) this.setTimeout(options.timeout);
+        if (options.signal) {
+            const signal = options.signal;
+            if (signal.aborted) process.nextTick(() => this.destroy(abortError(signal.reason)));
+            else signal.addEventListener('abort', () => this.destroy(abortError(signal.reason)), { once: true });
+        }
+    }
+
+    setHeader(name, value) {
+        if (this.headersSent) {
+            const e = new Error('Cannot set headers after they are sent to the client');
+            e.code = 'ERR_HTTP_HEADERS_SENT';
+            throw e;
+        }
+        this._headerMap.set(String(name).toLowerCase(), [String(name), value]);
+        return this;
+    }
+    getHeader(name) {
+        const entry = this._headerMap.get(String(name).toLowerCase());
+        return entry ? entry[1] : undefined;
+    }
+    getHeaders() {
+        const out = Object.create(null);
+        for (const [key, entry] of this._headerMap) out[key] = entry[1];
+        return out;
+    }
+    getHeaderNames() { return Array.from(this._headerMap.keys()); }
+    getRawHeaderNames() { return Array.from(this._headerMap.values(), e => e[0]); }
+    hasHeader(name) { return this._headerMap.has(String(name).toLowerCase()); }
+    removeHeader(name) { this._headerMap.delete(String(name).toLowerCase()); return this; }
+    flushHeaders() { this._sendHeaders(); }
+    setNoDelay() {}
+    setSocketKeepAlive() {}
+
+    setTimeout(ms, callback) {
+        if (callback) this.once('timeout', callback);
+        if (!this._timeoutWired) {
+            this._timeoutWired = true;
+            this.socket.on('timeout', () => this.emit('timeout'));
+        }
+        this.socket.setTimeout(ms);
+        return this;
+    }
+
+    // Framing is decided as late as possible: end(data) with nothing written
+    // yet knows the whole body, so it gets Content-Length rather than chunks.
+    _sendHeaders() {
+        if (this.headersSent) return;
+        const te = String(this.getHeader('transfer-encoding') || '').toLowerCase();
+        if (this.hasHeader('content-length')) {
+            this._chunked = false;
+        } else if (te.includes('chunked')) {
+            this._chunked = true;
+        } else if (this._knownLength !== null) {
+            if (this._knownLength > 0 || !NO_DEFAULT_CHUNKING.includes(this.method)) {
+                this._headerMap.set('content-length', ['Content-Length', String(this._knownLength)]);
+            }
+        } else if (!NO_DEFAULT_CHUNKING.includes(this.method) || this._streaming) {
+            this._chunked = true;
+            this._headerMap.set('transfer-encoding', ['Transfer-Encoding', 'chunked']);
+        }
+        if (!this.hasHeader('connection')) this._headerMap.set('connection', ['Connection', 'close']);
+        this.headersSent = true;
+
+        let head = `${this.method} ${this.path} HTTP/1.1\r\n`;
+        for (const [, [name, value]] of this._headerMap) {
+            if (Array.isArray(value)) for (const v of value) head += `${name}: ${v}\r\n`;
+            else head += `${name}: ${value}\r\n`;
+        }
+        this.socket.write(Buffer.from(head + '\r\n', 'latin1'));
+    }
+
+    _write(chunk, encoding, callback) {
+        if (!this.headersSent && this._knownLength === null) this._streaming = true;
+        this._sendHeaders();
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+        if (buf.length === 0) { callback(); return; }
+        if (this._chunked) {
+            this.socket.write(Buffer.from(`${buf.length.toString(16)}\r\n`, 'latin1'));
+            this.socket.write(buf);
+            this.socket.write(Buffer.from('\r\n', 'latin1'));
+        } else {
+            this.socket.write(buf);
+        }
+        callback();
+    }
+
+    end(chunk, encoding, callback) {
+        if (typeof chunk === 'function') { callback = chunk; chunk = undefined; }
+        else if (typeof encoding === 'function') { callback = encoding; encoding = undefined; }
+        if (!this.headersSent && !this._streaming) {
+            this._knownLength = chunk === undefined || chunk === null ? 0
+                : typeof chunk === 'string' ? Buffer.byteLength(chunk, encoding) : chunk.length;
+        }
+        return super.end(chunk, encoding, callback);
+    }
+
+    _final(callback) {
+        this._sendHeaders();
+        if (this._chunked) this.socket.write(Buffer.from('0\r\n\r\n', 'latin1'));
+        this.finished = true;
+        callback();
+    }
+
+    abort() {
+        if (this.aborted) return;
+        this.aborted = true;
+        process.nextTick(() => this.emit('abort'));
+        this.destroy();
+    }
+
+    destroy(err) {
+        if (this.destroyed) return this;
+        this.destroyed = true;
+        if (this.res && !this.res.complete) {
+            this.res.emit('aborted');
+            this._failResponse(err || sockError('ECONNRESET', 'read', 'aborted'));
+        } else if (err && !this.res) {
+            this.emit('error', err);
+        }
+        this.socket.destroy();
+        return this;
+    }
+
+    // ── response parsing ──────────────────────────────────────────────────────
+
+    _onData(chunk) {
+        const b = this._body || (this._body = { pending: Buffer.alloc(0), mode: null, remaining: 0, chunkNeed: -1 });
+        b.pending = b.pending.length === 0 ? chunk : Buffer.concat([b.pending, chunk]);
+        this._parse();
+    }
+
+    _parse() {
+        const b = this._body;
+        for (;;) {
+            if (this.res === null) {
+                const end = b.pending.indexOf('\r\n\r\n');
+                if (end < 0) {
+                    if (b.pending.length > MAX_HEADER_BYTES) this._protocolError('response header block too large');
+                    return;
+                }
+                const head = b.pending.toString('latin1', 0, end);
+                b.pending = b.pending.subarray(end + 4);
+                if (!this._startResponse(head)) return;
+                continue;
+            }
+            if (this.res.complete) return;
+            if (b.mode === 'chunked') {
+                if (!this._readChunk()) return;
+                continue;
+            }
+            if (b.pending.length === 0) return;
+            if (b.mode === 'length') {
+                const take = Math.min(b.remaining, b.pending.length);
+                this.res.push(Buffer.from(b.pending.subarray(0, take)));
+                b.pending = b.pending.subarray(take);
+                b.remaining -= take;
+                if (b.remaining === 0) this._completeResponse();
+            } else {
+                this.res.push(Buffer.from(b.pending));
+                b.pending = Buffer.alloc(0);
+            }
+        }
+    }
+
+    _startResponse(head) {
+        const lines = head.split('\r\n');
+        const m = /^HTTP\/(\d)\.(\d) (\d{3})(?: (.*))?$/.exec(lines[0] || '');
+        if (!m) { this._protocolError('malformed status line'); return false; }
+        const res = new IncomingMessage(this.socket);
+        res.httpVersionMajor = Number(m[1]);
+        res.httpVersionMinor = Number(m[2]);
+        res.httpVersion = `${m[1]}.${m[2]}`;
+        res.statusCode = Number(m[3]);
+        res.statusMessage = m[4] || '';
+        for (let i = 1; i < lines.length; i++) {
+            const colon = lines[i].indexOf(':');
+            if (colon <= 0) continue;
+            const name = lines[i].slice(0, colon).trim();
+            const value = lines[i].slice(colon + 1).trim();
+            const key = name.toLowerCase();
+            res.rawHeaders.push(name, value);
+            if (key === 'set-cookie') (res.headers[key] || (res.headers[key] = [])).push(value);
+            else if (res.headers[key] !== undefined) res.headers[key] = `${res.headers[key]}, ${value}`;
+            else res.headers[key] = value;
+        }
+
+        // An interim response (100 Continue, 103 Early Hints) precedes the
+        // real one on the same connection.
+        if (res.statusCode >= 100 && res.statusCode < 200 && res.statusCode !== 101) {
+            this.emit('information', {
+                statusCode: res.statusCode, statusMessage: res.statusMessage,
+                httpVersion: res.httpVersion, headers: res.headers, rawHeaders: res.rawHeaders,
+            });
+            return true;
+        }
+
+        const b = this._body;
+        const te = String(res.headers['transfer-encoding'] || '').toLowerCase();
+        if (this.method === 'HEAD' || res.statusCode === 204 || res.statusCode === 304) {
+            b.mode = 'none';
+        } else if (te.split(',').map(t => t.trim()).includes('chunked')) {
+            b.mode = 'chunked';
+        } else if (res.headers['content-length'] !== undefined) {
+            const len = parseInt(res.headers['content-length'], 10);
+            b.mode = 'length';
+            b.remaining = Number.isFinite(len) && len > 0 ? len : 0;
+            if (b.remaining === 0) b.mode = 'none';
+        } else {
+            b.mode = 'close';
+        }
+
+        res.req = this;
+        this.res = res;
+        // The body waits in the stream until someone reads it, so a listener
+        // attached after 'response' still sees all of it.
+        if (this.listenerCount('response') > 0) this.emit('response', res);
+        else res.resume();
+        if (b.mode === 'none') this._completeResponse();
+        return true;
+    }
+
+    _readChunk() {
+        const b = this._body;
+        for (;;) {
+            if (b.chunkNeed < 0) {
+                const eol = b.pending.indexOf('\r\n');
+                if (eol < 0) return false;
+                const size = parseInt(b.pending.toString('latin1', 0, eol).split(';')[0].trim(), 16);
+                if (!Number.isFinite(size) || size < 0) { this._protocolError('malformed chunk size'); return false; }
+                b.pending = b.pending.subarray(eol + 2);
+                if (size === 0) {
+                    // Trailers, if any, then the blank line that ends them.
+                    const end = b.pending.indexOf('\r\n\r\n');
+                    const blank = b.pending.subarray(0, 2).toString('latin1') === '\r\n';
+                    if (!blank && end < 0) { b.chunkNeed = -2; return false; }
+                    b.pending = b.pending.subarray(blank ? 2 : end + 4);
+                    this._completeResponse();
+                    return true;
+                }
+                b.chunkNeed = size;
+            }
+            if (b.chunkNeed === -2) return false;
+            if (b.pending.length < b.chunkNeed + 2) return false;
+            this.res.push(Buffer.from(b.pending.subarray(0, b.chunkNeed)));
+            b.pending = b.pending.subarray(b.chunkNeed + 2);
+            b.chunkNeed = -1;
+        }
+    }
+
+    _completeResponse() {
+        const res = this.res;
+        if (res.complete) return;
+        res.complete = true;
+        res.push(null);
+        // Connection: close was asked for, so this connection is done once the
+        // request has finished sending, whether or not the server hangs up.
+        const socket = this.socket;
+        socket.end(() => socket.destroy());
+    }
+
+    _protocolError(detail) {
+        const e = new Error(`Parse Error: ${detail}`);
+        e.code = 'HPE_INVALID_CONSTANT';
+        if (this.res) this._failResponse(e);
+        else this.emit('error', e);
+        this.socket.destroy();
+    }
+
+    _failResponse(err) {
+        const res = this.res;
+        if (!res || res.complete) return;
+        res.complete = true;
+        res.emit('error', err);
+        res.push(null);
+    }
+
+    _onEnd() {
+        if (this.res === null) {
+            if (!this.destroyed) this.emit('error', sockError('ECONNRESET', 'read', 'socket hang up'));
+            this.destroyed = true;
+            return;
+        }
+        if (this._body.mode === 'close') this._completeResponse();
+        else if (!this.res.complete) {
+            this.res.emit('aborted');
+            this._failResponse(sockError('ECONNRESET', 'read', 'aborted'));
+        }
+    }
+
+    _onSocketError(err) {
+        if (this.res === null) {
+            if (!this.destroyed) {
+                this.destroyed = true;
+                this.emit('error', err);
+            }
+        } else if (!this.res.complete) {
+            this.res.emit('aborted');
+            this._failResponse(err);
+        }
+    }
+
+    _onClose() {
+        this.destroyed = true;
+        if (this.res) {
+            if (!this.res.complete) {
+                if (this._body.mode === 'close') this._completeResponse();
+                else { this.res.emit('aborted'); this._failResponse(sockError('ECONNRESET', 'read', 'aborted')); }
+            }
+            process.nextTick(() => this.res.emit('close'));
+        }
+        process.nextTick(() => this.emit('close'));
+    }
+}
+
+function abortError(reason) {
+    const e = new Error('The operation was aborted', reason !== undefined ? { cause: reason } : undefined);
+    e.name = 'AbortError';
+    e.code = 'ABORT_ERR';
+    return e;
+}
+
+function httpRequest(...args) {
+    const [options, callback] = normalizeRequestArgs(args);
+    return new ClientRequest(options, callback);
+}
+
 class HttpServer extends Server {
     constructor(options, requestListener) {
         if (typeof options === 'function') {
@@ -3854,12 +5011,107 @@ const httpModule = {
     IncomingMessage,
     ServerResponse,
     createServer(options, requestListener) { return new HttpServer(options, requestListener); },
-    request() { throw outboundUnsupported('http.request'); },
-    get() { throw outboundUnsupported('http.get'); },
-    Agent: class Agent {
-        constructor() { throw outboundUnsupported('http.Agent'); }
+    ClientRequest,
+    Agent,
+    globalAgent,
+    request: httpRequest,
+    get(...args) {
+        const req = httpRequest(...args);
+        req.end();
+        return req;
     },
-    globalAgent: null,
+    validateHeaderName(name) {
+        if (!TOKEN.test(String(name))) {
+            const e = new TypeError(`Header name must be a valid HTTP token ["${name}"]`);
+            e.code = 'ERR_INVALID_HTTP_TOKEN';
+            throw e;
+        }
+    },
+    validateHeaderValue(name, value) {
+        if (value === undefined || /[^\t\x20-\x7e\x80-\xff]/.test(String(value))) {
+            const e = new TypeError(`Invalid value "${value}" for header "${name}"`);
+            e.code = 'ERR_INVALID_CHAR';
+            throw e;
+        }
+    },
+    maxHeaderSize: MAX_HEADER_BYTES,
+};
+
+// ═══ async_hooks ══════════════════════════════════════════════════════════════
+// AsyncLocalStorage and AsyncResource over the async context at the top of
+// this file. A store set with run() is visible across awaits, promise chains,
+// timers and socket events started inside it, which is what request-scoped
+// context needs. createHook is present for code that installs one, but its
+// callbacks never fire: the engine has no async resource lifecycle to report.
+
+let _asyncIdSeq = 1;
+
+class AsyncLocalStorage {
+    static bind(fn) { return _bindAsyncContext(fn); }
+    static snapshot() {
+        const context = _getAsyncContext();
+        return (fn, ...args) => _runInAsyncContext(context, fn, null, args);
+    }
+    getStore() {
+        const context = _getAsyncContext();
+        return context instanceof Map ? context.get(this) : undefined;
+    }
+    run(store, fn, ...args) { return _runInAsyncContext(this._with(store), fn, null, args); }
+    exit(fn, ...args) { return _runInAsyncContext(this._without(), fn, null, args); }
+    enterWith(store) { _setAsyncContext(this._with(store)); }
+    disable() { _setAsyncContext(this._without()); }
+    // A fresh Map each time: a context captured earlier must not change under
+    // the code that captured it.
+    _with(store) {
+        const current = _getAsyncContext();
+        const next = new Map(current instanceof Map ? current : undefined);
+        next.set(this, store);
+        return next;
+    }
+    _without() {
+        const current = _getAsyncContext();
+        if (!(current instanceof Map) || !current.has(this)) return current;
+        const next = new Map(current);
+        next.delete(this);
+        return next.size ? next : undefined;
+    }
+}
+
+class AsyncResource {
+    constructor(type, options) {
+        this.type = type;
+        this._asyncContext = _getAsyncContext();
+        this._asyncId = ++_asyncIdSeq;
+        this._triggerAsyncId = (options && typeof options === 'object' && options.triggerAsyncId) || 1;
+    }
+    runInAsyncScope(fn, thisArg, ...args) { return _runInAsyncContext(this._asyncContext, fn, thisArg, args); }
+    bind(fn, thisArg) {
+        const resource = this;
+        const bound = function (...args) {
+            return resource.runInAsyncScope(fn, thisArg === undefined ? this : thisArg, ...args);
+        };
+        Object.defineProperty(bound, 'length', { value: fn.length, configurable: true });
+        bound.asyncResource = resource;
+        return bound;
+    }
+    static bind(fn, type, thisArg) {
+        return new AsyncResource(type || fn.name || 'bound-anonymous-fn').bind(fn, thisArg);
+    }
+    emitDestroy() { return this; }
+    asyncId() { return this._asyncId; }
+    triggerAsyncId() { return this._triggerAsyncId; }
+}
+
+const asyncHooksModule = {
+    AsyncLocalStorage,
+    AsyncResource,
+    createHook() {
+        return { enable() { return this; }, disable() { return this; } };
+    },
+    executionAsyncId() { return 1; },
+    triggerAsyncId() { return 0; },
+    executionAsyncResource() { return {}; },
+    asyncWrapProviders: {},
 };
 
 // ═══ Modules the sandbox cannot provide ═══════════════════════════════════════
@@ -3963,6 +5215,7 @@ const builtins = {
     'worker_threads': workerThreads,
     'child_process': childProcess,
     'tty': tty,
+    'async_hooks': asyncHooksModule,
     // Both are real modules when the engine has the socket bindings and the
     // same throwing shape as zlib when it does not, so a package that merely
     // requires one keeps loading either way.
@@ -4094,20 +5347,24 @@ function splitPackageRequest(request) {
 ///
 /// Returns the path, `undefined` when no condition matched, or `null` when the
 /// package blocked the subpath outright (a `null` target).
-function resolveExportsTarget(pkgDir, target, patternMatch) {
+function resolveExportsTarget(pkgDir, target, patternMatch, allowBare) {
     if (target === null) return null;
 
     if (typeof target === 'string') {
+        const sub = patternMatch === null ? target : target.split('*').join(patternMatch);
+        // An "imports" target may name a package or a builtin instead.
+        if (allowBare && !target.startsWith('./') && !target.startsWith('../') && !target.startsWith('/')) {
+            return { bare: sub };
+        }
         // Only relative targets are addressable; anything else (a bare
         // specifier, an absolute path) is not ours to resolve.
         if (!target.startsWith('./')) return undefined;
-        const sub = patternMatch === null ? target : target.split('*').join(patternMatch);
         return path.join(pkgDir, sub);
     }
 
     if (Array.isArray(target)) {
         for (const alt of target) {
-            const resolved = resolveExportsTarget(pkgDir, alt, patternMatch);
+            const resolved = resolveExportsTarget(pkgDir, alt, patternMatch, allowBare);
             if (resolved !== undefined) return resolved;
         }
         return undefined;
@@ -4116,7 +5373,7 @@ function resolveExportsTarget(pkgDir, target, patternMatch) {
     if (target && typeof target === 'object') {
         for (const key of Object.keys(target)) {
             if (key !== 'default' && !EXPORTS_CONDITIONS.includes(key)) continue;
-            const resolved = resolveExportsTarget(pkgDir, target[key], patternMatch);
+            const resolved = resolveExportsTarget(pkgDir, target[key], patternMatch, allowBare);
             if (resolved !== undefined) return resolved;
         }
         return undefined;
@@ -4125,11 +5382,13 @@ function resolveExportsTarget(pkgDir, target, patternMatch) {
     return undefined;
 }
 
-function resolveExports(pkgDir, exportsField, subpath) {
+/// `allowBare` is the "imports" variant: the field is always a map, keyed by
+/// `#` specifiers, and its targets may be bare specifiers.
+function resolveExports(pkgDir, exportsField, subpath, allowBare) {
     let map = exportsField;
-    const isSubpathMap = exportsField && typeof exportsField === 'object'
+    const isSubpathMap = allowBare || (exportsField && typeof exportsField === 'object'
         && !Array.isArray(exportsField)
-        && Object.keys(exportsField).some(k => k === '.' || k.startsWith('./'));
+        && Object.keys(exportsField).some(k => k === '.' || k.startsWith('./')));
 
     if (!isSubpathMap) {
         // Shorthand: a string, an array, or a bare condition object is the
@@ -4139,7 +5398,7 @@ function resolveExports(pkgDir, exportsField, subpath) {
     }
 
     if (Object.prototype.hasOwnProperty.call(map, subpath)) {
-        return resolveExportsTarget(pkgDir, map[subpath], null);
+        return resolveExportsTarget(pkgDir, map[subpath], null, allowBare);
     }
 
     // Subpath patterns ("./*": "./dist/*.js"). The longest matching prefix
@@ -4157,7 +5416,7 @@ function resolveExports(pkgDir, exportsField, subpath) {
     }
     if (best) {
         const match = subpath.slice(best.prefix.length, subpath.length - best.suffix.length);
-        return resolveExportsTarget(pkgDir, map[best.key], match);
+        return resolveExportsTarget(pkgDir, map[best.key], match, allowBare);
     }
 
     return undefined;
@@ -4238,6 +5497,36 @@ function resolveNodeModules(request, fromDir) {
     return null;
 }
 
+/// package.json "imports": a `#name` request resolves against the nearest
+/// package.json above the requiring file, which is how a package maps a private
+/// name to a builtin on node and to a stub elsewhere (p-limit's #async_hooks).
+function resolvePackageImports(request, fromDir) {
+    let dir = fromDir;
+    for (;;) {
+        const pkgPath = path.join(dir, 'package.json');
+        if (isFile(pkgPath)) {
+            let pkg = null;
+            try { pkg = JSON.parse(tryRead(pkgPath)); } catch (_) { pkg = null; }
+            const map = pkg && pkg.imports;
+            const target = map && typeof map === 'object' ? resolveExports(dir, map, request, true) : undefined;
+            if (target && typeof target === 'object') return resolveModule(target.bare, dir);
+            if (typeof target === 'string') {
+                const asFile = resolveAsFile(target) || resolveAsFile(path.join(target, 'index'));
+                if (asFile) return { builtin: false, id: asFile };
+            }
+            const e = new Error(`Package import specifier "${request}" is not defined in package ${pkgPath}`);
+            e.code = 'ERR_PACKAGE_IMPORT_NOT_DEFINED';
+            throw e;
+        }
+        const parent = path.dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+    }
+    const e = new Error(`Package import specifier "${request}" is not defined (no package.json above '${fromDir}')`);
+    e.code = 'ERR_PACKAGE_IMPORT_NOT_DEFINED';
+    throw e;
+}
+
 function resolveModule(request, fromDir) {
     if (typeof request !== 'string' || !request) {
         const e = new Error(`require(): request must be a non-empty string`);
@@ -4247,6 +5536,7 @@ function resolveModule(request, fromDir) {
     if (Object.prototype.hasOwnProperty.call(builtins, request)) {
         return { builtin: true, id: request };
     }
+    if (request.startsWith('#')) return resolvePackageImports(request, fromDir);
 
     if (request.startsWith('/') || request.startsWith('./') || request.startsWith('../')
         || request === '.' || request === '..') {
@@ -4393,7 +5683,7 @@ function _setTimeout(fn, delay, ...args) {
         throw new TypeError("setTimeout: callback must be a function");
     }
     const ms = delay > 0 ? delay : 0;
-    const cb = args.length ? () => fn(...args) : fn;
+    const cb = _bindAsyncContext(args.length ? () => fn(...args) : fn);
     if (_hasOsTimer) return os.setTimeout(cb, ms);
     // No native timer in this build: best-effort microtask deferral (the delay
     // cannot be honoured without the os poll loop).
@@ -4414,7 +5704,7 @@ function _setInterval(fn, delay, ...args) {
     if (!_hasOsTimer) return 0;
     const ms = delay > 0 ? delay : 0;
     const id = _intervalSeq++;
-    const tick = () => {
+    const tick = _bindAsyncContext(() => {
         if (!_intervals.has(id)) return; // cleared while the timer was pending
         try {
             fn(...args);
@@ -4422,7 +5712,7 @@ function _setInterval(fn, delay, ...args) {
             const rec = _intervals.get(id);
             if (rec) rec.handle = os.setTimeout(tick, ms);
         }
-    };
+    });
     _intervals.set(id, { handle: os.setTimeout(tick, ms) });
     return id;
 }
@@ -4581,6 +5871,16 @@ function _onRejection(promise, reason, handled) {
     }
 }
 
+/// The loop is about to drain: node's 'beforeExit', which may schedule more
+/// work. The C side carries on if it did. Never emitted once the process is
+/// already exiting (process.exit, an uncaught error), as in node.
+function _onBeforeExit() {
+    const proc = globalThis.process;
+    if (_lifecycle.exiting || !proc || typeof proc.listenerCount !== "function") return;
+    if (proc.listenerCount("beforeExit") === 0) return;
+    proc.emit("beforeExit", _exitCodeOf(proc.exitCode));
+}
+
 /// The loop has drained: node's 'exit', then the code the C side exits with.
 function _onLoopDrained() {
     const code = _emitExit(_exitCodeOf(globalThis.process && globalThis.process.exitCode));
@@ -4591,6 +5891,7 @@ function _onLoopDrained() {
 const _hostHooks = {
     rejection: _onRejection,
     uncaught: (err) => _fatalException(err, "uncaughtException"),
+    beforeExit: _onBeforeExit,
     exit: _onLoopDrained,
 };
 
@@ -4601,6 +5902,36 @@ function installHostHooks() {
 }
 
 // ═══ Globals ═════════════════════════════════════════════════════════════════
+
+/// Milliseconds from a monotonic clock where the engine has one (os.now), so
+/// uptime and hrtime do not jump with the wall clock.
+function _monotonicMs() {
+    return typeof os.now === "function" ? os.now() : Date.now();
+}
+
+const _processStart = _monotonicMs();
+
+/// [seconds, nanoseconds] since an arbitrary point, or since `prev`.
+function _hrtime(prev) {
+    const ns = BigInt(Math.round(_monotonicMs() * 1e6));
+    let sec = Number(ns / 1000000000n);
+    let nsec = Number(ns % 1000000000n);
+    if (Array.isArray(prev)) {
+        sec -= prev[0];
+        nsec -= prev[1];
+        if (nsec < 0) { sec -= 1; nsec += 1e9; }
+    }
+    return [sec, nsec];
+}
+_hrtime.bigint = () => BigInt(Math.round(_monotonicMs() * 1e6));
+
+/// node's fields. rss is the instance's whole linear memory; the heap figures
+/// are the engine's accounting. Zeros on an engine without the binding.
+function _memoryUsage() {
+    if (typeof os.memoryUsage === "function") return os.memoryUsage();
+    return { rss: 0, heapTotal: 0, heapUsed: 0, external: 0, arrayBuffers: 0 };
+}
+_memoryUsage.rss = () => _memoryUsage().rss;
 
 function setupGlobals(entryPath, extraArgs) {
     const env = std.getenviron ? std.getenviron() : {};
@@ -4647,13 +5978,9 @@ function setupGlobals(entryPath, extraArgs) {
             // real Node, but the ordering relative to timers is preserved.
             _deferMicrotask(() => fn(...args));
         },
-        hrtime: (() => {
-            const start = Date.now();
-            return () => {
-                const ms = Date.now() - start;
-                return [Math.floor(ms / 1000), (ms % 1000) * 1e6];
-            };
-        })(),
+        hrtime: _hrtime,
+        uptime() { return (_monotonicMs() - _processStart) / 1000; },
+        memoryUsage: _memoryUsage,
     });
     globalThis.global = globalThis;
     globalThis.console = nodeConsole;
@@ -4695,11 +6022,11 @@ function printVersion() {
     std.out.puts(`Node.js compat: v${NODE_COMPAT_VERSION}.x\n`);
     std.out.puts(`Engine: ${ENGINE}\n`);
     std.out.puts(`Target: WASI Preview 1\n`);
-    std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, stdin, timers, async, buffer, exports-map resolution, inbound sockets\n`);
-    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises, console, process, tty, net, http, node:test (and node:* aliases)\n`);
-    std.out.puts(`Networking: ${HAS_SOCKETS ? 'net/http servers over a host-provided listening socket (WASMHUB_LISTEN_FD)' : 'unavailable in this build'}; outbound connect is not supported on WASI Preview 1\n`);
+    std.out.puts(`Features: eval, run, require, filesystem, env, args, stdio, stdin, timers, async, buffer, exports-map and imports resolution, inbound sockets${HAS_OUTBOUND ? ', outbound sockets, fetch' : ''}, ${HAS_NATIVE_HASH ? 'native' : 'pure-JS'} hashing\n`);
+    std.out.puts(`Built-ins: path, fs, fs/promises, os, buffer, events, util, assert, stream, crypto, url, querystring, string_decoder, timers, timers/promises, console, process, tty, net, http, async_hooks, node:test (and node:* aliases)\n`);
+    std.out.puts(`Networking: ${HAS_SOCKETS ? 'net/http servers over a host-provided listening socket (WASMHUB_LISTEN_FD)' : 'unavailable in this build'}; ${HAS_OUTBOUND ? 'outbound connect through the host (sock_open/sock_connect)' : 'no outbound connect in this build (nodejs-20-net has it)'}\n`);
     std.out.puts(`Stubbed: zlib, worker_threads, child_process, https, dgram, tls (present, throw a clear error when used)\n`);
-    std.out.puts(`Globals: console, Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone\n`);
+    std.out.puts(`Globals: console, Buffer, TextEncoder, TextDecoder, atob, btoa, URL, URLSearchParams, crypto, structuredClone, Headers, Request, Response, AbortController, AbortSignal, Event, EventTarget, fetch${HAS_OUTBOUND ? "" : " (rejects: no outbound connect in this build)"}\n`);
     std.out.flush();
 }
 

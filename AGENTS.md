@@ -71,7 +71,7 @@ manifest.json (root)
 6. **Optimization flags matter.** `--enable-bulk-memory` is required for both Go and Rust WASM outputs. Missing it breaks compatibility.
 7. **The nodejs runtime is verified against a built wasm, not only the node harness.** `just test-nodejs-builtins` loads `main.js` under node, with node's own console, event loop and process, so it cannot see what the QuickJS engine actually does. v0.5.0 shipped with no `console.error` and with every failed run exiting 0, and the harness passed throughout. Run `just test-nodejs-wasm` and `just test-nodejs-wasmrun` on a rebuilt runtime for any change to `runtimes/nodejs/` or `scripts/patch-nodejs.sh`, and add a fixture (with its expected exit code in the `CHECKS` table of `run-fixtures.mjs`) for behavior only the engine can show.
 9. **wasmrun is the runtime's real consumer, and it is not built on wasmtime.** It has its own interpreter (`src/runtime/core/`) and its own WASI (`src/runtime/wasi/`), and runs the nodejs runtime through its agent mode. Test against it, not only against wasmtime, and never reason about wasmrun from wasmtime's behavior: wasmtime's limits (no listen sockets from 47 on, the fd 3 preopen problem) do not apply to it, and its own bugs do not show up under wasmtime. A fixture that fails on one host for a reason outside this runtime gets a `knownFailure` entry for that host rather than being dropped.
-8. **QuickJS engine changes go in `scripts/patch-nodejs.sh`.** It patches the pristine QuickJS tarball at build time (`os.getentropy`, `std.evalScript`'s `filename`, the `os.sock*` bindings, and `os.setHostHooks` for uncaught errors, rejections and exit codes). Each patch is an idempotent Python edit that fails loudly when its anchor is missing. Never edit a checked-out QuickJS tree by hand.
+8. **QuickJS engine changes go in `scripts/patch-nodejs.sh`.** It patches the pristine QuickJS tarball at build time (`os.getentropy`, `std.evalScript`'s `filename`, the `os.sock*` and host bindings, `os.setHostHooks` for uncaught errors, rejections, `beforeExit` and exit codes, and the async context `quickjs.c` carries through promise reactions for `AsyncLocalStorage`). Each patch is an idempotent Python edit that fails loudly when its anchor is missing. Never edit a checked-out QuickJS tree by hand.
 
 ---
 
@@ -224,12 +224,16 @@ runtimes/
 │   └── manifest.json        # Per-language manifest
 ├── nodejs/
 │   ├── main.js              # Node.js API surface on QuickJS (bundled with qjsc)
-│   ├── wasi_sockets.c       # os.sock* bindings over WASI Preview 1 sockets
+│   ├── wasi_sockets.c       # os.sock* bindings over WASI Preview 1 sockets; -DWASMHUB_OUTBOUND adds
+│   │                        #   sock_open/sock_connect (wasmrun extensions) for nodejs-20-net.wasm
+│   ├── hash.c, hash.h       # md5/sha1/sha2 digests behind crypto.createHash (no QuickJS dependency)
+│   ├── host_bindings.c      # os.hash*, os.memoryUsage, os.get/setAsyncContext
+│   ├── features-net.txt     # features the -net build adds to features.txt
 │   ├── wasi_stubs.c, wasi_shims.h, wasi_include/  # WASI link/compile shims
 │   ├── features.txt
 │   └── manifest.json
 └── swc/
-    ├── src/main.rs          # TypeScript → JavaScript transpiler CLI (MVP-only wasm)
+    ├── src/main.rs          # TypeScript → JavaScript transpiler CLI
     ├── features.txt
     └── manifest.json
 
@@ -239,7 +243,7 @@ scripts/
 ├── build-rust.sh            # Rust → WASM via wasm32-wasip1
 ├── build-nodejs.sh          # QuickJS + main.js → WASM via WASI SDK
 ├── patch-nodejs.sh          # Idempotent QuickJS engine patches applied at build time
-├── build-swc.sh             # swc CLI → MVP-only WASM
+├── build-swc.sh             # swc CLI → WASM, validated against wasmrun's feature set
 ├── optimize-wasm.sh         # wasm-opt optimization + compression
 ├── verify-binary.sh         # WASM magic number + SHA256 verification
 ├── generate-metadata.sh     # Creates/updates per-language manifest.json

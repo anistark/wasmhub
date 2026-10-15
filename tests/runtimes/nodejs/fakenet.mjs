@@ -57,14 +57,27 @@ export class Peer {
 export class FakeNet {
     /// `listenFd` is what a test puts in WASMHUB_LISTEN_FD. `maxSend` caps a
     /// single send, so the runtime has to make several calls for one write.
+    ///
+    /// `outbound` makes it a host with sock_open/sock_connect, the -net build's
+    /// bindings: a function called with (host, port) for each connect the
+    /// runtime makes, returning an errno string to refuse it or anything else
+    /// to accept. Every accepted connect is pushed onto `dialed` as
+    /// { host, port, peer }, where `peer` is the remote server's end.
     constructor(options = {}) {
         this.listenFd = options.listenFd ?? 3;
         this.maxSend = options.maxSend ?? Infinity;
+        this.outbound = options.outbound || null;
+        this.dialed = [];
         this.listenerClosed = false;
         this.nonblocking = new Set();
         this._nextFd = this.listenFd + 1;
         this._pending = [];
         this._conns = new Map();
+    }
+
+    /// The peer of the nth outbound connection, once the runtime has made it.
+    async dial(n = 0) {
+        return (await until(() => this.dialed[n], { label: `outbound connection ${n}` })).peer;
     }
 
     /// Open a connection to the server and return the client's end of it.
@@ -77,7 +90,7 @@ export class FakeNet {
     /// The object the harness hands to the runtime as its os.sock* bindings.
     get backend() {
         const self = this;
-        return {
+        const backend = {
             nonblocking(fd) { self.nonblocking.add(fd); return null; },
 
             accept(fd) {
@@ -129,6 +142,17 @@ export class FakeNet {
                 return null;
             },
         };
+        if (this.outbound) {
+            backend.connect = (host, port) => {
+                const refused = self.outbound(host, port);
+                if (typeof refused === 'string') return [-1, refused];
+                const conn = new Connection(self._nextFd++);
+                self._conns.set(conn.fd, conn);
+                self.dialed.push({ host, port, peer: new Peer(conn) });
+                return [conn.fd, null];
+            };
+        }
+        return backend;
     }
 }
 

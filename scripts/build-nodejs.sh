@@ -53,6 +53,13 @@ SYSROOT="${WASI_SDK_PATH}/share/wasi-sysroot"
 QUICKJS_DIR="${BUILD_DIR}/quickjs-${QUICKJS_VERSION}"
 OUTPUT_NAME="nodejs-${NODE_VERSION}.wasm"
 OUTPUT_PATH="${BUILD_DIR}/${OUTPUT_NAME}"
+# The same runtime with outbound sockets (net.connect, http.request, fetch).
+# It imports sock_open and sock_connect, wasmrun extensions a stock WASI host
+# lacks, so it is a second artifact rather than the default: a host without
+# them cannot instantiate it.
+NET_VERSION="${NODE_VERSION}-net"
+NET_OUTPUT_NAME="nodejs-${NET_VERSION}.wasm"
+NET_OUTPUT_PATH="${BUILD_DIR}/${NET_OUTPUT_NAME}"
 
 mkdir -p "${BUILD_DIR}" "${RUNTIMES_DIR}"
 
@@ -156,53 +163,70 @@ echo "  Compiling WASI link-time stubs..."
 "${CLANG}" "${WASM_CFLAGS[@]}" -c "${RUNTIMES_DIR}/wasi_stubs.c" -o "${BUILD_DIR}/wasi_stubs.o"
 WASM_OBJS+=("${BUILD_DIR}/wasi_stubs.o")
 
+# Native hashing, memoryUsage and the async context (os.hash*, ...). No host
+# imports, so these are in both builds.
+echo "  Compiling host bindings..."
+"${CLANG}" "${WASM_CFLAGS[@]}" -c "${RUNTIMES_DIR}/hash.c" -o "${BUILD_DIR}/hash.o"
+"${CLANG}" "${WASM_CFLAGS[@]}" -c "${RUNTIMES_DIR}/host_bindings.c" -o "${BUILD_DIR}/host_bindings.o"
+WASM_OBJS+=("${BUILD_DIR}/hash.o" "${BUILD_DIR}/host_bindings.o")
+
 # The socket bindings behind os.sock*, which main.js turns into `net` and
-# `http`. Preview 1 standard calls only (sock_accept/recv/send/shutdown), so
-# this adds no import a stock WASI host does not already provide.
+# `http`. The default object uses Preview 1 standard calls only
+# (sock_accept/recv/send/shutdown), so it adds no import a stock WASI host does
+# not already provide; the -net object adds sock_open and sock_connect.
 echo "  Compiling WASI socket bindings..."
 "${CLANG}" "${WASM_CFLAGS[@]}" -c "${RUNTIMES_DIR}/wasi_sockets.c" -o "${BUILD_DIR}/wasi_sockets.o"
-WASM_OBJS+=("${BUILD_DIR}/wasi_sockets.o")
+"${CLANG}" "${WASM_CFLAGS[@]}" -DWASMHUB_OUTBOUND -c "${RUNTIMES_DIR}/wasi_sockets.c" -o "${BUILD_DIR}/wasi_sockets_net.o"
 
-# ── Link ──────────────────────────────────────────────────────────────────────
+# ── Link, optimize, publish ───────────────────────────────────────────────────
 
-echo "Linking WASM binary..."
-"${CLANG}" \
-    --target=wasm32-wasi \
-    --sysroot="${SYSROOT}" \
-    "${WASM_OBJS[@]}" \
-    -lwasi-emulated-signal \
-    -lwasi-emulated-process-clocks \
-    -ldl \
-    -lwasi-emulated-getpid \
-    -lm \
-    -Wl,-z,stack-size=8388608 \
-    -o "${OUTPUT_PATH}"
+# link_runtime <socket object> <output path>
+link_runtime() {
+    echo "Linking $(basename "$2")..."
+    "${CLANG}" \
+        --target=wasm32-wasi \
+        --sysroot="${SYSROOT}" \
+        "${WASM_OBJS[@]}" "$1" \
+        -lwasi-emulated-signal \
+        -lwasi-emulated-process-clocks \
+        -ldl \
+        -lwasi-emulated-getpid \
+        -lm \
+        -Wl,-z,stack-size=8388608 \
+        -o "$2"
 
-# ── Optimize ──────────────────────────────────────────────────────────────────
+    if [[ "${OPTIMIZE}" == "true" ]] && command -v wasm-opt &> /dev/null; then
+        echo "Optimizing $(basename "$2") with wasm-opt..."
+        wasm-opt -O3 --enable-bulk-memory "$2" -o "$2.opt"
+        mv "$2.opt" "$2"
+    fi
 
-if [[ "${OPTIMIZE}" == "true" ]] && command -v wasm-opt &> /dev/null; then
-    echo "Optimizing with wasm-opt..."
-    wasm-opt -O3 --enable-bulk-memory "${OUTPUT_PATH}" -o "${OUTPUT_PATH}.opt"
-    mv "${OUTPUT_PATH}.opt" "${OUTPUT_PATH}"
-fi
+    local size sha
+    size=$(stat -f%z "$2" 2>/dev/null || stat -c%s "$2")
+    sha=$(shasum -a 256 "$2" | cut -d' ' -f1)
+    echo "  File: $2"
+    echo "  Size: ${size} bytes"
+    echo "  SHA256: ${sha}"
+    cp "$2" "${RUNTIMES_DIR}/"
+}
 
-# ── Finish ────────────────────────────────────────────────────────────────────
-
-SIZE=$(stat -f%z "${OUTPUT_PATH}" 2>/dev/null || stat -c%s "${OUTPUT_PATH}")
-SHA256=$(shasum -a 256 "${OUTPUT_PATH}" | cut -d' ' -f1)
-
-echo ""
-echo "Build complete:"
-echo "  File: ${OUTPUT_PATH}"
-echo "  Size: ${SIZE} bytes"
-echo "  SHA256: ${SHA256}"
-
-cp "${OUTPUT_PATH}" "${RUNTIMES_DIR}/"
+link_runtime "${BUILD_DIR}/wasi_sockets.o" "${OUTPUT_PATH}"
+link_runtime "${BUILD_DIR}/wasi_sockets_net.o" "${NET_OUTPUT_PATH}"
 
 # The feature list lives beside the runtime source, not in this script and not
 # in the generated manifest, so adding a feature and publishing it are the same
 # change. A hardcoded list here silently overwrote the manifest at release time.
 FEATURES=$(read_features "${RUNTIMES_DIR}/features.txt")
+NET_FEATURES="${FEATURES},$(read_features "${RUNTIMES_DIR}/features-net.txt")"
+
+# The -net entry first and --no-latest, so `latest` stays the portable build:
+# a consumer asking for the latest runtime gets one every host can load.
+"${SCRIPT_DIR}/generate-metadata.sh" \
+    --language nodejs \
+    --version "${NET_VERSION}" \
+    --file "${RUNTIMES_DIR}/${NET_OUTPUT_NAME}" \
+    --features "${NET_FEATURES}" \
+    --no-latest
 
 "${SCRIPT_DIR}/generate-metadata.sh" \
     --language nodejs \

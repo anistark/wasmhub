@@ -15,6 +15,7 @@ usage() {
     echo "Options:"
     echo "  --wasi VERSION          WASI version (default: wasip1)"
     echo "  --features FEATURES     Comma-separated features"
+    echo "  --no-latest             Add the version without making it latest"
     echo "  -h, --help              Show this help"
     exit 1
 }
@@ -24,6 +25,7 @@ VERSION=""
 WASM_FILE=""
 WASI_VERSION="wasip1"
 FEATURES=""
+SET_LATEST=true
 
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
         -f|--file) WASM_FILE="$2"; shift 2 ;;
         --wasi) WASI_VERSION="$2"; shift 2 ;;
         --features) FEATURES="$2"; shift 2 ;;
+        --no-latest) SET_LATEST=false; shift ;;
         -h|--help) usage ;;
         *) echo "Unknown option: $1"; usage ;;
     esac
@@ -87,7 +90,8 @@ EOF
     if command -v jq &> /dev/null; then
         jq --argjson newver "${NEW_VERSION}" \
            --arg ver "${VERSION}" \
-           '.versions[$ver] = $newver | .latest = $ver' \
+           --argjson setlatest "${SET_LATEST}" \
+           '.versions[$ver] = $newver | if $setlatest then .latest = $ver else . end' \
            "${MANIFEST_FILE}" > "${TMP_FILE}"
         # mktemp creates files as 600; keep the manifest world-readable so the
         # CI runner user can read it after the container (root) writes it

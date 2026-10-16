@@ -60,15 +60,7 @@ const CHECKS = [
     { name: 'stream', file: 'stream.js', code: 0, text: 'pipe=FOO|BAR|BAZ|!' },
     { name: 'webglobals', file: 'webglobals.js', code: 0, text: 'fetch.err=clear' },
     { name: 'builtins', file: 'builtins.js', code: 0, text: 'builtins=pass' },
-    {
-        name: 'append',
-        file: 'append.js',
-        code: 0,
-        text: 'append=pass',
-        knownFailure: {
-            wasmrun: "wasmrun's path_open ignores fdflags, so O_APPEND is dropped and an append overwrites from offset 0 (anistark/wasmrun#123)",
-        },
-    },
+    { name: 'append', file: 'append.js', code: 0, text: 'append=pass' },
     { name: 'resolver', file: 'resolver.js', code: 0, text: 'resolver=pass' },
     { name: 'testrunner', file: 'testrunner.js', code: 0, text: '# pass 3' },
     { name: 'hashes', file: 'hashes.js', code: 0, text: 'hashes=pass' },

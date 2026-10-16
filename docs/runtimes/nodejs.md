@@ -209,14 +209,19 @@ wasmrun exec nodejs-20.wasm eval "[1,2,3].map(x => x * x).join(',')"
 wasmrun exec nodejs-20.wasm echo hello world
 # → hello world
 
-# Print the environment the host passed (none, under wasmrun exec)
-wasmrun exec nodejs-20.wasm env
+# Print the environment the host passed
+wasmrun exec --env GREETING=hi nodejs-20.wasm env
+# → GREETING=hi
+
+# Run a file from a preopened directory
+wasmrun exec --dir ./scripts:/app nodejs-20.wasm run /app/app.js
 ```
 
 `run <file>` needs the host to give the program a directory to read the file
-from. `wasmrun exec` gives it none, so a file goes through wasmrun's
-[agent mode](https://wasmrun.readthedocs.io/), which fetches this runtime
-itself and runs each program in a session with its own filesystem:
+from, which `--dir` does (wasmrun 1.0 and later). `wasmrun exec` exits with the
+program's exit code. wasmrun's [agent mode](https://wasmrun.readthedocs.io/)
+fetches this runtime itself and runs each program in a session with its own
+filesystem:
 
 ```sh
 wasmrun agent &
@@ -227,10 +232,7 @@ curl -s -X POST localhost:8430/api/v1/sessions/$SID/exec \
 # → {"stdout":"app.js\n","stderr":"","exit_code":0,...}
 ```
 
-Agent mode reports the program's exit code as `exit_code`. `wasmrun exec`
-prints it but, as of wasmrun 0.23.0, always exits 0 itself, so a script that
-needs to tell a failed run from a passing one should use agent mode or another
-host.
+Agent mode reports the program's exit code as `exit_code`.
 
 Or with any host that preopens a directory, such as wasmtime:
 

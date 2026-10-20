@@ -65,23 +65,23 @@ The checks are one table run under either of two hosts:
 
 A check that fails on one host for a reason outside this runtime carries a
 `knownFailure` for that host and is reported as `xfail`; if it starts passing,
-the run fails, so the marker goes when the bug does. Today that is `append` on
-wasmrun, whose `path_open` ignores the append flag
-([anistark/wasmrun#123](https://github.com/anistark/wasmrun/issues/123)).
+the run fails, so the marker goes when the bug does. No check carries one
+today.
 
 CI runs both hosts on every runtime build (`build-runtimes.yml`) and on the
 release binary before any asset is staged (`release.yml`), with wasmtime pinned
 to 46.0.1 and `WASMHUB_REQUIRE_HTTP=1`, so the wasmtime `httpserver.js` check
-cannot quietly turn into a skip, and wasmrun pinned to 0.23.0.
+cannot quietly turn into a skip, and wasmrun pinned to 1.0.0.
 
 ## Running one by hand
 
-`--only` above runs one under either host. By hand, with wasmtime, map the
-fixtures directory to `/` (`wasmrun exec` preopens no directory, so it cannot
-open a fixture file):
+`--only` above runs one under either host. By hand, map the fixtures
+directory to `/`, with wasmtime or wasmrun 1.0:
 
 ```sh
 wasmtime run --dir tests/runtimes/nodejs/fixtures::/ \
+  runtimes/nodejs/nodejs-20.wasm run /app.js
+wasmrun exec --dir tests/runtimes/nodejs/fixtures:/ \
   runtimes/nodejs/nodejs-20.wasm run /app.js
 ```
 
